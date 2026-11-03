@@ -4,10 +4,12 @@
 from __future__ import print_function
 
 import filecmp
+import os
 import os.path
 import re
 import shutil
 import sys
+import threading
 from textwrap import dedent
 
 import pytest
@@ -1502,3 +1504,138 @@ def test_sync_multiple_top_level_requirements_for_single_project(tmpdir):
     assert_sync()
     assert_sync("paramiko>=3.5.0", "paramiko>=3.5.0,<=4.0.0")
     assert_sync("paramiko>=3.5.0,<=4.0.0", "paramiko>=3.5.0")
+
+
+def assert_no_sync_leftovers(path):
+    # type: (str) -> None
+    parent = os.path.dirname(path)
+    leftovers = [
+        name
+        for name in os.listdir(parent)
+        if name.endswith(".pex-sync-work") or name.endswith(".pex-sync-old")
+    ]
+    assert [] == leftovers, leftovers
+    state_dir = os.path.join(parent, ".{name}.pex-sync".format(name=os.path.basename(path)))
+    if os.path.isdir(state_dir):
+        pending = [name for name in os.listdir(state_dir) if name.startswith("pending.")]
+        assert [] == pending, pending
+
+
+def test_sync_failure_pair_intact(
+    tmpdir,  # type: Any
+    repo_args,  # type: List[str]
+    path_mappings,  # type: PathMappings
+):
+    # type: (...) -> None
+
+    # A sync that fails to resolve must leave the previously committed lock and venv usable as a
+    # matching pair; it must never publish one resource without the other.
+    lock = os.path.join(str(tmpdir), "lock.json")
+    venv_dir = os.path.join(str(tmpdir), "venv")
+    run_sync("cowsay==5.0", "--lock", lock, "--venv", venv_dir, *repo_args).assert_success()
+    assert_lock_matches_venv(
+        lock=lock,
+        path_mappings=path_mappings,
+        venv=venv_dir,
+        expected_pins=[pin("cowsay", "5.0")],
+    )
+
+    run_sync(
+        "cowsay==5.0",
+        "this-dist-does-not-exist-zzz",
+        "--yes",
+        "--lock",
+        lock,
+        "--venv",
+        venv_dir,
+        *repo_args,
+    ).assert_failure()
+
+    assert_lock_matches_venv(
+        lock=lock,
+        path_mappings=path_mappings,
+        venv=venv_dir,
+        expected_pins=[pin("cowsay", "5.0")],
+    )
+    # The old venv is still a working venv, not a half-installed one.
+    assert b"| Moo! |" in subprocess.check_output(
+        args=[Virtualenv(venv_dir).bin_path("cowsay"), "Moo!"]
+    )
+    assert_no_sync_leftovers(lock)
+    assert_no_sync_leftovers(venv_dir)
+
+
+def test_first_create_failure_clean(
+    tmpdir,  # type: Any
+    repo_args,  # type: List[str]
+):
+    # type: (...) -> None
+
+    # A first create that fails must not leave anything a later call could mistake for a
+    # committed lock or venv.
+    lock = os.path.join(str(tmpdir), "lock.json")
+    venv_dir = os.path.join(str(tmpdir), "venv")
+    run_sync(
+        "this-dist-does-not-exist-zzz", "--lock", lock, "--venv", venv_dir, *repo_args
+    ).assert_failure()
+
+    assert not os.path.exists(lock)
+    assert not os.path.exists(venv_dir)
+    assert_no_sync_leftovers(lock)
+    assert_no_sync_leftovers(venv_dir)
+
+
+def test_lock_only_failure_creates_no_lock(
+    tmpdir,  # type: Any
+    repo_args,  # type: List[str]
+):
+    # type: (...) -> None
+
+    lock = os.path.join(str(tmpdir), "lock.json")
+    run_sync("this-dist-does-not-exist-zzz", "--lock", lock, *repo_args).assert_failure()
+    assert not os.path.exists(lock)
+    assert_no_sync_leftovers(lock)
+
+
+def test_concurrent_sync_owner(
+    tmpdir,  # type: Any
+    repo_args,  # type: List[str]
+    path_mappings,  # type: PathMappings
+):
+    # type: (...) -> None
+
+    # Two concurrent syncs for the same lock / venv pair share a single publication owner; one
+    # waits for the other and then reads the committed generation (a no-op) instead of
+    # overwriting either resource itself.
+    lock = os.path.join(str(tmpdir), "lock.json")
+    venv_dir = os.path.join(str(tmpdir), "venv")
+    args = ("cowsay==5.0", "--lock", lock, "--venv", venv_dir) + tuple(repo_args)
+
+    results = []  # type: List[Any]
+    results_guard = threading.Lock()
+
+    def run():
+        result = run_sync(*args)
+        with results_guard:
+            results.append(result)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert 2 == len(results)
+    for result in results:
+        result.assert_success()
+    assert_lock_matches_venv(
+        lock=lock,
+        path_mappings=path_mappings,
+        venv=venv_dir,
+        expected_pins=[pin("cowsay", "5.0")],
+    )
+    assert b"| Moo! |" in subprocess.check_output(
+        args=[Virtualenv(venv_dir).bin_path("cowsay"), "Moo!"]
+    )
+    assert_no_sync_leftovers(lock)
+    assert_no_sync_leftovers(venv_dir)

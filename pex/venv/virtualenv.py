@@ -365,30 +365,7 @@ class Virtualenv(object):
             install_wheel=install_wheel,
             other_installs=other_installs,
         )
-        for script in virtualenv._rewrite_base_scripts(real_venv_dir=venv_dir.target_dir):
-            TRACER.log("Re-writing {}".format(script))
-
-        # It's known that PyPy's 7.3.14 releases create venvs with absolute symlinks in bin/ to
-        # bin/ local files, which leaves invalid symlinks to the atomic workdir. We fix that up
-        # here. See: https://github.com/pypy/pypy/issues/4838
-        for path in os.listdir(virtualenv.bin_dir):
-            abs_path = os.path.join(virtualenv.bin_dir, path)
-            if not os.path.islink(abs_path):
-                continue
-            link_target = os.readlink(abs_path)
-            if not os.path.isabs(link_target):
-                continue
-            if virtualenv.bin_dir == safe_commonpath((virtualenv.bin_dir, link_target)):
-                rel_dst = os.path.relpath(link_target, virtualenv.bin_dir)
-                TRACER.log(
-                    "Replacing absolute symlink {src} -> {dst} with relative symlink".format(
-                        src=abs_path, dst=link_target
-                    ),
-                    V=3,
-                )
-                os.unlink(abs_path)
-                safe_symlink(rel_dst, abs_path)
-
+        virtualenv.rewrite_for_target_dir(real_venv_dir=venv_dir.target_dir)
         return virtualenv
 
     def __init__(
@@ -531,6 +508,37 @@ class Virtualenv(object):
                         sys.stdout.write("executable = {python}\n".format(python=python))
                     else:
                         sys.stdout.write(line)
+
+    def rewrite_for_target_dir(self, real_venv_dir):
+        # type: (str) -> None
+        """Rewrite a venv built at a staging path for life at `real_venv_dir`.
+
+        Rewrites shebangs / activate scripts and repairs intra-venv absolute symlinks so the venv
+        can be renamed from its staging (work) directory to `real_venv_dir` and work as-is.
+        """
+        for script in self._rewrite_base_scripts(real_venv_dir=real_venv_dir):
+            TRACER.log("Re-writing {}".format(script))
+
+        # It's known that PyPy's 7.3.14 releases create venvs with absolute symlinks in bin/ to
+        # bin/ local files, which leaves invalid symlinks to the staging workdir. We fix that up
+        # here. See: https://github.com/pypy/pypy/issues/4838
+        for path in os.listdir(self.bin_dir):
+            abs_path = os.path.join(self.bin_dir, path)
+            if not os.path.islink(abs_path):
+                continue
+            link_target = os.readlink(abs_path)
+            if not os.path.isabs(link_target):
+                continue
+            if self.bin_dir == safe_commonpath((self.bin_dir, link_target)):
+                rel_dst = os.path.relpath(link_target, self.bin_dir)
+                TRACER.log(
+                    "Replacing absolute symlink {src} -> {dst} with relative symlink".format(
+                        src=abs_path, dst=link_target
+                    ),
+                    V=3,
+                )
+                os.unlink(abs_path)
+                safe_symlink(rel_dst, abs_path)
 
     def _rewrite_base_scripts(self, real_venv_dir):
         # type: (str) -> Iterator[str]

@@ -1,0 +1,3319 @@
+diff --git a/evidence/rubric-comparison-report.txt b/evidence/rubric-comparison-report.txt
+new file mode 100644
+index 00000000..bd3bb839
+--- /dev/null
++++ b/evidence/rubric-comparison-report.txt
+@@ -0,0 +1,9 @@
++项目：pex-tool-pex-3be191fa-211c-4806-829a-2c682486f25c｜Session：6ae94311e498b5216ff888e3｜结论：部分完成
++Rubric ID：1｜状态：未通过｜期望行为：同步成功时 lock 与 venv 只对外呈现同一代解析结果。｜实际观察：提交按 venv 后 lock 的两个独立重命名执行；在 venv 已替换而 lock 尚未替换的受控交错中读取到 venv=new、lock=old。｜直接证据：visibility_repro.py 输出 P1_VISIBILITY {'lock': 'old', 'venv': 'new'}。｜原因：发布协议没有为两个公开路径提供统一可见切换点。｜影响：同步提交过程中其他进程能够读取新环境与旧锁的混合代次。｜证据位置：pex/atomic_sync.py:560-580；F:/swe/work/visibility_repro.py
++Rubric ID：2｜状态：通过｜期望行为：解析、安装或移除失败时保留原 lock 与 venv，首次失败不留下成功状态。｜实际观察：解析和候选环境修改均发生在候选路径，prepared 前的错误调用 abort 删除候选；12 个状态机单测覆盖失败保留与首次创建清理并全部通过。｜直接证据：python -m pytest tests/test_atomic_sync.py 得到 12 passed；pex/cli/commands/lock.py:2704-2868。
++Rubric ID：3｜状态：未通过｜期望行为：替换失败或进程中断后重试能清理或接管候选状态并收敛。｜实际观察：acquire 捕获恢复异常后只发出警告并继续返回所有权；注入恢复失败后 acquire_returned=True 且 pending_remains=1。｜直接证据：adversarial_repro.py 输出 P1_RECOVERY，保留 pending 文件并返回成功。｜原因：恢复失败未传回主流程，新的同步仍可在未恢复代次上继续执行。｜影响：重试不会保证先恢复旧提交状态，遗留候选和待提交记录持续存在。｜证据位置：pex/atomic_sync.py:314-324；F:/swe/work/adversarial_repro.py
++Rubric ID：4｜状态：未通过｜期望行为：同一路径的并发同步不能分别覆盖 lock 与 venv，竞争完成后只观察完整代次。｜实际观察：写入调用受 owner lock 串行化，但公开资源仍分两次重命名；受控交错在一个提交持锁期间观察到新 venv 与旧 lock。｜直接证据：P1_VISIBILITY 输出 lock=old、venv=new；单所有者测试仅证明竞争写者等待。｜原因：互斥锁约束写者，不约束未持锁的读取者观察两个公开路径。｜影响：并发消费者可在提交窗口使用不匹配的锁和环境。｜证据位置：pex/atomic_sync.py:302-324、560-580；tests/test_atomic_sync.py:309-367
++Rubric ID：5｜状态：通过｜期望行为：lock-only 与 dry-run 保持既有输出和非变更行为。｜实际观察：dry-run 在创建发布所有者前返回；lock-only 仅在候选 lock 存在时执行单文件原子替换，否则 abort。｜直接证据：pex/cli/commands/lock.py:2636-2647、2754-2767；test_lock_only_create_update 与 test_lock_only_noop 通过。
++Rubric ID：6｜状态：通过｜期望行为：同步成功后的后置命令在已提交环境执行，命令非零不回滚同步。｜实际观察：publication.release 后重新解析最终 venv 并执行命令，命令结果直接返回且没有回滚路径。｜直接证据：pex/cli/commands/lock.py:2875-2891。
++
++关键原始证据摘要：无缓存状态机测试 12 passed；恢复异常复现为 acquire 返回且 pending 保留；提交中间点复现为 lock=old、venv=new。
+diff --git a/evidence/screenshots/01-rubric-comparison.png b/evidence/screenshots/01-rubric-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f207ef86c9b6139f6d7f4d08c0c24776e86efd0
+GIT binary patch
+literal 66914
+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%0Di{_i0;7?ffLc
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/evidence/verify-rubric.yaml b/evidence/verify-rubric.yaml
+new file mode 100644
+index 00000000..dcbf469f
+--- /dev/null
++++ b/evidence/verify-rubric.yaml
+@@ -0,0 +1,19 @@
++rubrics:
++  - id: 1
++    type: f2p
++    text: "创建或更新同步成功时，lock 与 venv 只对外呈现同一代解析结果，环境中的分发集合与最终 lock 一致。"
++  - id: 2
++    type: f2p
++    text: "依赖解析、分发安装或移除失败时，原有 lock 和原有 venv 均保持可用；首次同步失败不会留下可被后续调用当作成功结果的文件或环境。"
++  - id: 3
++    type: f2p
++    text: "最终替换失败或进程在发布途中中断后，重试能够清理或接管候选状态并收敛到一套结果，不需要用户手工修复混合状态。"
++  - id: 4
++    type: f2p
++    text: "针对同一 lock 与 venv 的并发同步不会分别覆盖两项资源，等待或竞争调用完成后只能观察已提交代次或安全重新计算。"
++  - id: 5
++    type: p2p
++    text: "不指定 venv 的 lock-only 同步和 dry-run 保持既有输出及非变更行为。"
++  - id: 6
++    type: p2p
++    text: "同步成功后 -- 后命令仍在已提交环境中执行，命令自身非零退出不会回滚已经成功同步的 lock 与 venv。"
+diff --git a/pex/atomic_sync.py b/pex/atomic_sync.py
+new file mode 100644
+index 00000000..5331d590
+--- /dev/null
++++ b/pex/atomic_sync.py
+@@ -0,0 +1,602 @@
++# Copyright 2026 Pex project contributors.
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++"""Atomic, generation-based publication of a matching lock file / venv pair.
++
++A sync computes a lock, resolves and installs a venv and finally publishes *both* results. The
++two published resources are only ever useful as a matching pair: a new lock against an old (or
++half-installed) venv is a corrupt state for the next consumer (tox, nox, CI, ...).
++
++To avoid that, a :class:`SyncPublication` drives the whole operation as a single recoverable
++generation:
++
++1. The caller acquires the *publication owner* lock for the lock file path. All concurrent syncs
++   for the same lock (and thus its paired venv) block on this one lock; a process that dies
++   releases it automatically.
++2. Any interrupted generation from a dead owner is recovered before new work begins.
++3. The new lock is written to a sibling candidate file and the new venv is built in a sibling
++   candidate directory (a fresh create, or a hardlinked clone of the existing venv mutated in
++   place). Neither published path is touched during this phase.
++4. Once both candidates are complete and validated, a ``committing`` marker is fsynced and the
++   switch is performed with only renames, in a deterministic order: first move the existing venv
++   aside (if any), then publish the venv, then publish the lock. The lock file - the resource
++   consumers consult first - is thus always the last thing to change and always points at a venv
++   that is already in place.
++5. The committed generation marker is published and all backups / candidates / pending state are
++   removed.
++
++A crash at any point leaves the previously committed resources usable and lets the next owner
++either roll the interrupted generation forward (all candidates were complete when the switch
++began) or discard it (the switch never began).
++"""
++
++from __future__ import absolute_import
++
++import errno
++import hashlib
++import json
++import os
++import shutil
++import threading
++from uuid import uuid4
++
++from pex import pex_warnings
++from pex.common import safe_delete, safe_mkdir, safe_rmtree
++from pex.fs import lock as fs_lock
++from pex.fs import safe_rename
++from pex.typing import TYPE_CHECKING
++from pex.version import __version__
++
++if TYPE_CHECKING:
++    from typing import Dict, Optional
++
++    import attr  # vendor:skip
++else:
++    from pex.third_party import attr
++
++
++PHASE_STAGING = "staging"
++PHASE_COMMITTING = "committing"
++
++WORK_SUFFIX = ".pex-sync-work"
++OLD_SUFFIX = ".pex-sync-old"
++
++
++@attr.s(frozen=True)
++class Generation(object):
++    """A committed lock / venv generation."""
++
++    @classmethod
++    def load(cls, path):
++        # type: (str) -> Optional[Generation]
++        if not os.path.exists(path):
++            return None
++        with open(path, "r") as fp:
++            data = json.load(fp)
++        return cls(
++            generation=data["generation"],
++            lock_path=data["lock"],
++            venv_dir=data.get("venv"),
++            lock_sha256=data.get("lock_sha256"),
++            pex_version=data.get("pex_version"),
++        )
++
++    generation = attr.ib()  # type: str
++    lock_path = attr.ib()  # type: str
++    venv_dir = attr.ib(default=None)  # type: Optional[str]
++    lock_sha256 = attr.ib(default=None)  # type: Optional[str]
++    pex_version = attr.ib(default=None)  # type: Optional[str]
++
++    def dump(self, path):
++        # type: (str) -> None
++        _atomic_dump_json(
++            path,
++            {
++                "generation": self.generation,
++                "lock": self.lock_path,
++                "venv": self.venv_dir,
++                "lock_sha256": self.lock_sha256,
++                "pex_version": self.pex_version,
++            },
++        )
++
++
++@attr.s(frozen=True)
++class _Pending(object):
++    """The record of a generation that is being staged or switched into place."""
++
++    @classmethod
++    def load(cls, path):
++        # type: (str) -> _Pending
++        with open(path, "r") as fp:
++            data = json.load(fp)
++        return cls(
++            generation=data["generation"],
++            phase=data["phase"],
++            lock_path=data["lock"],
++            venv_dir=data.get("venv"),
++            venv_existed=bool(data.get("venv_existed", False)),
++            lock_candidate=data["lock_candidate"],
++            venv_candidate=data.get("venv_candidate"),
++            venv_stash=data.get("venv_stash"),
++        )
++
++    generation = attr.ib()  # type: str
++    phase = attr.ib()  # type: str
++    lock_path = attr.ib()  # type: str
++    venv_dir = attr.ib(default=None)  # type: Optional[str]
++    venv_existed = attr.ib(default=False)  # type: bool
++    lock_candidate = attr.ib(default="")  # type: str
++    venv_candidate = attr.ib(default=None)  # type: Optional[str]
++    venv_stash = attr.ib(default=None)  # type: Optional[str]
++
++    def dump(self, path):
++        # type: (str) -> None
++        _atomic_dump_json(
++            path,
++            {
++                "generation": self.generation,
++                "phase": self.phase,
++                "lock": self.lock_path,
++                "venv": self.venv_dir,
++                "venv_existed": self.venv_existed,
++                "lock_candidate": self.lock_candidate,
++                "venv_candidate": self.venv_candidate,
++                "venv_stash": self.venv_stash,
++            },
++        )
++
++
++def _atomic_dump_json(path, data):
++    # type: (str, dict) -> None
++    tmp_path = "{path}.{uuid}.tmp".format(path=path, uuid=uuid4().hex)
++    with open(tmp_path, "w") as fp:
++        json.dump(data, fp, indent=2, sort_keys=True)
++        fp.write("\n")
++        fp.flush()
++        os.fsync(fp.fileno())
++    safe_rename(tmp_path, path)
++    _fsync_dir(os.path.dirname(path))
++
++
++def _fsync_dir(path):
++    # type: (str) -> None
++    if not path:
++        return
++    try:
++        fd = os.open(path, os.O_RDONLY)
++    except OSError:
++        return
++    try:
++        os.fsync(fd)
++    except OSError:
++        # fsync of a directory is unsupported on some platforms / filesystems; the atomic
++        # renames are still correct, durability of the directory entry is only best effort.
++        pass
++    finally:
++        os.close(fd)
++
++
++def _link_or_copy(src, dst):
++    # type: (str, str) -> None
++    try:
++        os.link(src, dst)
++        return
++    except OSError as e:
++        if e.errno not in (errno.EPERM, errno.EXDEV, errno.EACCES, errno.ENOSYS):
++            # Retry with a copy below for any link failure rather than risking the sync; hard
++            # links are only an optimization.
++            pass
++    shutil.copy2(src, dst)
++
++
++def _clone_tree(source, destination):
++    # type: (str, str) -> None
++    """Recreates the `source` tree at `destination` without touching file contents.
++
++    Directories and symlinks are recreated and regular files are hard-linked (falling back to a
++    copy when the filesystem does not support links). The clone is therefore cheap and safe to
++    mutate: installs replace files via rename/unlink, never by truncating a shared inode.
++    """
++    os.mkdir(destination)
++    for root, dirnames, filenames in os.walk(source, followlinks=False):
++        relative = os.path.relpath(root, source)
++        destination_root = (
++            destination if relative == os.curdir else os.path.join(destination, relative)
++        )
++        for dirname in dirnames:
++            source_dir = os.path.join(root, dirname)
++            destination_dir = os.path.join(destination_root, dirname)
++            if os.path.islink(source_dir):
++                # Symlinked directories are entries, not trees to walk.
++                os.symlink(os.readlink(source_dir), destination_dir)
++            else:
++                os.mkdir(destination_dir)
++        for filename in filenames:
++            source_file = os.path.join(root, filename)
++            destination_file = os.path.join(destination_root, filename)
++            if os.path.islink(source_file):
++                os.symlink(os.readlink(source_file), destination_file)
++            else:
++                _link_or_copy(source_file, destination_file)
++
++
++# In-process serialization so that threads in the same process also share a single owner. The
++# underlying file lock is process-scoped on POSIX (fcntl locks belong to the process).
++_IN_PROCESS_LOCKS = {}  # type: Dict[str, threading.Lock]
++_IN_PROCESS_LOCKS_GUARD = threading.Lock()
++
++
++def _in_process_lock(path):
++    # type: (str) -> threading.Lock
++    with _IN_PROCESS_LOCKS_GUARD:
++        lock = _IN_PROCESS_LOCKS.get(path)
++        if lock is None:
++            lock = threading.Lock()
++            _IN_PROCESS_LOCKS[path] = lock
++        return lock
++
++
++class SyncPublicationError(Exception):
++    """Indicates an irrecoverable error publishing a synced lock / venv generation."""
++
++
++class SyncPublication(object):
++    """Owns publication of one matching lock file / venv pair for one generation."""
++
++    def __init__(
++        self,
++        lock_path,  # type: str
++        venv_dir=None,  # type: Optional[str]
++    ):
++        # type: (...) -> None
++        self._lock_path = os.path.abspath(lock_path)
++        self._venv_dir = os.path.realpath(venv_dir) if venv_dir else None
++
++        lock_parent = os.path.dirname(self._lock_path) or os.curdir
++        self._state_dir = os.path.join(
++            lock_parent, ".{name}.pex-sync".format(name=os.path.basename(self._lock_path))
++        )
++        self._owner_lock_file = os.path.join(self._state_dir, "owner.lck")
++        self._generation_file = os.path.join(self._state_dir, "generation.json")
++
++        self._in_process_lock = _in_process_lock(self._owner_lock_file)
++        self._file_lock = None  # type: Optional[fs_lock.FileLock]
++
++        self._generation = None  # type: Optional[str]
++        self._pending_path = None  # type: Optional[str]
++        self._lock_candidate = None  # type: Optional[str]
++        self._venv_candidate = None  # type: Optional[str]
++        self._venv_stash = None  # type: Optional[str]
++        self._venv_existed = False
++        self._phase = None  # type: Optional[str]
++
++    @property
++    def lock_path(self):
++        # type: () -> str
++        return self._lock_path
++
++    @property
++    def venv_dir(self):
++        # type: () -> Optional[str]
++        return self._venv_dir
++
++    @property
++    def lock_candidate_path(self):
++        # type: () -> str
++        if self._lock_candidate is None:
++            raise SyncPublicationError("The sync publication has not been staged.")
++        return self._lock_candidate
++
++    @property
++    def venv_candidate_dir(self):
++        # type: () -> str
++        if self._venv_candidate is None:
++            raise SyncPublicationError("The sync publication has no venv staged.")
++        return self._venv_candidate
++
++    def committed_generation(self):
++        # type: () -> Optional[Generation]
++        return Generation.load(self._generation_file)
++
++    def acquire(self):
++        # type: () -> None
++        """Become the unique publication owner for this lock / venv pair and recover the past.
++
++        Blocks while another in-process thread or OS process owns the publication. Any
++        interrupted generation left by a dead owner is rolled forward or discarded before this
++        returns, so the on-disk state is always a consistent committed generation afterwards.
++        """
++        self._in_process_lock.acquire()
++        try:
++            safe_mkdir(self._state_dir)
++            self._file_lock = fs_lock.acquire(self._owner_lock_file, exclusive=True)
++        except OSError:
++            self._in_process_lock.release()
++            raise
++        # Any pending records belong to a (now dead) previous owner; the file lock is ours.
++        for pending_path in self._iter_pending_paths():
++            try:
++                self._recover(_Pending.load(pending_path), pending_path)
++            except Exception as e:
++                pex_warnings.warn(
++                    "Failed to recover an interrupted sync generation recorded at "
++                    "{pending}: {err}".format(pending=pending_path, err=e)
++                )
++
++    def __enter__(self):
++        # type: () -> SyncPublication
++        self.acquire()
++        return self
++
++    def release(self):
++        # type: () -> None
++        if self._file_lock is not None:
++            try:
++                self._file_lock.release()
++            finally:
++                self._file_lock = None
++        self._in_process_lock.release()
++
++    def __exit__(self, exc_type, exc_val, exc_tb):
++        self.release()
++
++    def _iter_pending_paths(self):
++        # type: () -> list
++        if not os.path.isdir(self._state_dir):
++            return []
++        pending_paths = [
++            os.path.join(self._state_dir, name)
++            for name in os.listdir(self._state_dir)
++            if name.startswith("pending.") and name.endswith(".json")
++        ]
++        # Oldest interrupted generation first; each recovery is independent anyway.
++        return sorted(pending_paths, key=lambda p: (os.path.getmtime(p), p))
++
++    def staging(
++        self,
++        venv_existed=False,  # type: bool
++    ):
++        # type: (...) -> None
++        """Open a new generation and reserve candidate paths for it.
++
++        No committed resource is touched until :meth:`commit`; candidates abandoned before the
++        switch are removed by :meth:`abort` and a dead process's staging leftovers are discarded
++        by the next owner.
++        """
++        if self._phase is not None:
++            raise SyncPublicationError("A sync generation is already in progress.")
++        self._generation = uuid4().hex
++        self._venv_existed = venv_existed and self._venv_dir is not None
++        self._lock_candidate = "{lock}.{gen}{suffix}".format(
++            lock=self._lock_path, gen=self._generation, suffix=WORK_SUFFIX
++        )
++        if self._venv_dir:
++            self._venv_candidate = "{venv}.{gen}{suffix}".format(
++                venv=self._venv_dir, gen=self._generation, suffix=WORK_SUFFIX
++            )
++            self._venv_stash = "{venv}.{gen}{suffix}".format(
++                venv=self._venv_dir, gen=self._generation, suffix=OLD_SUFFIX
++            )
++        self._pending_path = os.path.join(
++            self._state_dir, "pending.{gen}.json".format(gen=self._generation)
++        )
++        self._phase = PHASE_STAGING
++        self._write_pending()
++
++    def _write_pending(self):
++        # type: () -> None
++        if self._pending_path is None:
++            return
++        assert self._generation is not None
++        assert self._lock_candidate is not None
++        _Pending(
++            generation=self._generation,
++            phase=self._phase or PHASE_STAGING,
++            lock_path=self._lock_path,
++            venv_dir=self._venv_dir,
++            venv_existed=self._venv_existed,
++            lock_candidate=self._lock_candidate or "",
++            venv_candidate=self._venv_candidate,
++            venv_stash=self._venv_stash,
++        ).dump(self._pending_path)
++
++    def clone_existing_venv(self, source_venv_dir):
++        # type: (str) -> None
++        """Populate the venv candidate by cloning an existing venv.
++
++        Files are hard-linked when the filesystem supports it (and copied otherwise); directories
++        and symlinks are recreated. The clone is therefore cheap and safe to mutate: installs
++        replace files via rename/unlink, never by truncating a shared inode.
++        """
++        if self._venv_candidate is None:
++            raise SyncPublicationError("There is no venv to stage for this publication.")
++        if os.path.exists(self._venv_candidate):
++            safe_rmtree(self._venv_candidate)
++        _clone_tree(os.path.realpath(source_venv_dir), self._venv_candidate)
++
++    def lock_sha256(self):
++        # type: () -> str
++        if self._lock_candidate is None or not os.path.exists(self._lock_candidate):
++            raise SyncPublicationError("The lock candidate has not been staged.")
++        digest = hashlib.sha256()
++        with open(self._lock_candidate, "rb") as fp:
++            for chunk in iter(lambda: fp.read(65536), b""):
++                digest.update(chunk)
++        return digest.hexdigest()
++
++    def prepared(self):
++        # type: () -> None
++        """Mark both candidates complete and validated; the switch may now begin.
++
++        The phase flip is fsynced so a dead process is always observed in exactly one of two
++        well-defined states: staging (nothing was renamed; discard candidates) or committing
++        (both candidates are complete; roll the switch forward).
++        """
++        if self._phase is None:
++            raise SyncPublicationError("The sync publication has not been staged.")
++        assert self._lock_candidate is not None
++        if not os.path.exists(self._lock_candidate):
++            raise SyncPublicationError(
++                "The lock candidate at {path} is missing.".format(path=self._lock_candidate)
++            )
++        if self._venv_dir and not (self._venv_candidate and os.path.isdir(self._venv_candidate)):
++            raise SyncPublicationError(
++                "The venv candidate at {path} is missing.".format(path=self._venv_candidate)
++            )
++        self._phase = PHASE_COMMITTING
++        self._write_pending()
++
++    def commit(self):
++        # type: () -> Generation
++        """Publish both candidates in the deterministic venv-then-lock order.
++
++        Only renames are performed here: the existing venv (if any) is moved aside, the candidate
++        venv takes its place and only then is the candidate lock renamed over the lock path. A
++        crash leaves a ``committing`` pending record behind that the next owner rolls forward
++        through the same steps.
++        """
++        if self._phase != PHASE_COMMITTING or self._pending_path is None:
++            raise SyncPublicationError("The sync publication is not ready to commit.")
++
++        pending = _Pending.load(self._pending_path)
++        self._switch(pending)
++
++        generation = Generation(
++            generation=pending.generation,
++            lock_path=pending.lock_path,
++            venv_dir=pending.venv_dir,
++            lock_sha256=self._hash_lock(pending.lock_path),
++            pex_version=__version__,
++        )
++        generation.dump(self._generation_file)
++        self._finish(pending, pending_path=self._pending_path)
++        self._phase = None
++        return generation
++
++    def abort(self):
++        # type: () -> None
++        """Discard an in-progress generation that failed before (or without) switching.
++
++        Once the switch has begun this does nothing destructive: the next owner's recovery rolls
++        the generation forward.
++        """
++        if self._phase is None:
++            return
++        if self._phase == PHASE_COMMITTING:
++            return
++        if self._lock_candidate:
++            safe_delete(self._lock_candidate)
++        if self._venv_candidate:
++            safe_rmtree(self._venv_candidate)
++        if self._pending_path:
++            safe_delete(self._pending_path)
++        self._phase = None
++
++    def _recover(self, pending, pending_path):
++        # type: (_Pending, str) -> None
++
++        if pending.phase == PHASE_STAGING:
++            # The switch never started; nothing at the published paths could have been touched.
++            safe_delete(pending.lock_candidate)
++            if pending.venv_candidate:
++                safe_rmtree(pending.venv_candidate)
++            if pending.venv_stash:
++                safe_rmtree(pending.venv_stash)
++            safe_delete(pending_path)
++            return
++
++        # A committing generation had both candidates complete when its owner died. Roll it
++        # forward through whichever renames remain; only a totally wrecked candidate set (manual
++        # deletion) is rolled back.
++        rolled_back = False
++        venv_dir = pending.venv_dir
++        if venv_dir:
++            venv_stash = pending.venv_stash
++            venv_candidate = pending.venv_candidate
++            stashed = bool(venv_stash and os.path.exists(venv_stash))
++            venv_present = os.path.exists(venv_dir)
++            candidate_present = bool(venv_candidate and os.path.exists(venv_candidate))
++
++            if stashed and not venv_present and not candidate_present:
++                # Both the new candidate and the published venv are gone but the backup survives;
++                # restore the known-good previous venv.
++                assert venv_stash is not None
++                os.rename(venv_stash, venv_dir)
++                rolled_back = True
++            else:
++                if not stashed and pending.venv_existed and venv_present:
++                    # Died before the first rename; the old venv is still live. Move it aside and
++                    # then publish the complete candidate.
++                    assert venv_stash is not None
++                    os.rename(venv_dir, venv_stash)
++                    stashed = True
++                    venv_present = False
++                if not venv_present and candidate_present:
++                    assert venv_candidate is not None
++                    os.rename(venv_candidate, venv_dir)
++
++        if rolled_back:
++            safe_delete(pending.lock_candidate)
++            safe_delete(pending_path)
++            return
++
++        if pending.lock_candidate and os.path.exists(pending.lock_candidate):
++            safe_rename(pending.lock_candidate, pending.lock_path)
++
++        if pending.venv_stash and os.path.exists(pending.venv_stash):
++            safe_rmtree(pending.venv_stash)
++
++        generation = Generation(
++            generation=pending.generation,
++            lock_path=pending.lock_path,
++            venv_dir=pending.venv_dir,
++            lock_sha256=self._hash_lock(pending.lock_path),
++            pex_version=__version__,
++        )
++        generation.dump(self._generation_file)
++        self._finish(pending, pending_path=pending_path)
++
++    def _switch(self, pending):
++        # type: (_Pending) -> None
++        if not pending.venv_dir:
++            safe_rename(pending.lock_candidate, pending.lock_path)
++            return
++
++        if pending.venv_existed and os.path.exists(pending.venv_dir):
++            assert pending.venv_stash is not None
++            os.rename(pending.venv_dir, pending.venv_stash)
++        if pending.venv_candidate and os.path.exists(pending.venv_candidate):
++            os.rename(pending.venv_candidate, pending.venv_dir)
++        elif not os.path.exists(pending.venv_dir):
++            raise SyncPublicationError(
++                "Cannot publish venv generation {gen}: neither the candidate at {candidate} nor a "
++                "venv at {venv} exist.".format(
++                    gen=pending.generation,
++                    candidate=pending.venv_candidate,
++                    venv=pending.venv_dir,
++                )
++            )
++        safe_rename(pending.lock_candidate, pending.lock_path)
++
++    @staticmethod
++    def _finish(pending, pending_path):
++        # type: (_Pending, str) -> None
++        if pending.lock_candidate:
++            safe_delete(pending.lock_candidate)
++        if pending.venv_candidate:
++            safe_rmtree(pending.venv_candidate)
++        if pending.venv_stash:
++            safe_rmtree(pending.venv_stash)
++        safe_delete(pending_path)
++
++    @staticmethod
++    def _hash_lock(lock_path):
++        # type: (str) -> Optional[str]
++        if not os.path.exists(lock_path):
++            return None
++        digest = hashlib.sha256()
++        with open(lock_path, "rb") as fp:
++            for chunk in iter(lambda: fp.read(65536), b""):
++                digest.update(chunk)
++        return digest.hexdigest()
+diff --git a/pex/cli/commands/lock.py b/pex/cli/commands/lock.py
+index b721cc6b..7cfdb62b 100644
+--- a/pex/cli/commands/lock.py
++++ b/pex/cli/commands/lock.py
+@@ -7,6 +7,7 @@ import functools
+ import itertools
+ import os.path
+ import re
++import shutil
+ import sys
+ from argparse import Action, ArgumentError, ArgumentParser, ArgumentTypeError, _ActionsContainer
+ from collections import OrderedDict, deque
+@@ -16,6 +17,7 @@ from operator import attrgetter
+ from pex import dependency_configuration, pex_warnings
+ from pex.argparse import HandleBoolAction
+ from pex.artifact_url import Fingerprint
++from pex.atomic_sync import SyncPublication
+ from pex.build_system import pep_517
+ from pex.cli.command import BuildTimeCommand
+ from pex.commands.command import JsonMixin, OutputMixin
+@@ -92,6 +94,7 @@ if TYPE_CHECKING:
+         IO,
+         Deque,
+         Dict,
++        FrozenSet,
+         Iterable,
+         Iterator,
+         List,
+@@ -261,46 +264,152 @@ class SyncTarget(object):
+     venv = attr.ib()  # type: Virtualenv
+     command = attr.ib(default=None)  # type: Optional[Tuple[str, ...]]
+ 
+-    def sync(
+-        self,
+-        distributions,  # type: Iterable[Distribution]
+-        confirm=True,  # type: bool
+-        retain_pip=False,  # type: bool
+-    ):
+-        # type: (...) -> Result
++    def run_command(self):
++        # type: () -> Result
++        if self.command:
++            try:
++                safe_execv(self.command)
++            except OSError as e:
++                return Error("Failed to execute {exe}: {err}".format(exe=self.command[0], err=e))
++        return Ok()
+ 
+-        abs_venv_dir = os.path.realpath(self.venv.venv_dir)
+-
+-        existing_distributions_by_project_name = {
+-            dist.metadata.project_name: dist for dist in self.venv.iter_distributions()
+-        }  # type: Dict[ProjectName, Distribution]
+-        installed_pip = existing_distributions_by_project_name.get(
+-            self._PIP_PROJECT_NAME
+-        )  # type: Optional[Distribution]
+-
+-        resolved_pip = None  # type: Optional[Distribution]
+-        to_remove = []  # type: List[Distribution]
+-        to_install = []  # type: List[Distribution]
+-        for distribution in distributions:
+-            if self._PIP_PROJECT_NAME == distribution.metadata.project_name:
+-                resolved_pip = distribution
+-            existing_distribution = existing_distributions_by_project_name.pop(
+-                distribution.metadata.project_name, None
+-            )
+-            if not existing_distribution:
+-                to_install.append(distribution)
+-            elif existing_distribution.metadata.version != distribution.metadata.version:
+-                to_remove.append(existing_distribution)
+-                to_install.append(distribution)
+-        if retain_pip:
+-            existing_distributions_by_project_name.pop(self._PIP_PROJECT_NAME, None)
+-        to_remove.extend(existing_distributions_by_project_name.values())
+-
+-        to_unlink_by_pin = (
+-            OrderedDict()
+-        )  # type: OrderedDict[Tuple[ProjectName, Version], List[Text]]
+-        for distribution in to_remove:
+-            to_unlink = []  # type: List[Text]
++
++@attr.s(frozen=True)
++class VenvSyncPlan(object):
++    """The changes needed to bring a venv in line with the resolved lock distributions.
++
++    The plan is described purely in terms of pins (not live files) so it can be computed against
++    the current venv (including prompting the user) and then applied to a staged candidate clone
++    of that venv without touching the live one until it is committed.
++    """
++
++    # Pip's bootstrapping (ensurepip) drags Pip itself plus, on Pythons older than 3.12,
++    # Setuptools and Wheel. These are managed outside the lock when Pip is retained and so are
++    # the only distributions allowed to appear in addition to the locked pins.
++    RETAINED_PIP_COMPANIONS = frozenset(
++        ProjectName(name) for name in ("pip", "setuptools", "wheel")
++    )
++
++    to_install = attr.ib()  # type: Tuple[Distribution, ...]
++    remove_pins = attr.ib()  # type: FrozenSet[Tuple[ProjectName, Version]]
++    expected_pins = attr.ib()  # type: FrozenSet[Tuple[ProjectName, Version]]
++    retain_pip = attr.ib(default=False)  # type: bool
++    ensure_pip = attr.ib(default=False)  # type: bool
++
++    @property
++    def is_noop(self):
++        # type: () -> bool
++        return not self.to_install and not self.remove_pins and not self.ensure_pip
++
++
++def _plan_venv_sync(
++    venv,  # type: Virtualenv
++    distributions,  # type: Iterable[Distribution]
++    confirm=True,  # type: bool
++    retain_pip=False,  # type: bool
++):
++    # type: (...) -> Union[VenvSyncPlan, Error]
++
++    existing_distributions_by_project_name = {
++        dist.metadata.project_name: dist for dist in venv.iter_distributions()
++    }  # type: Dict[ProjectName, Distribution]
++    installed_pip = existing_distributions_by_project_name.get(
++        SyncTarget._PIP_PROJECT_NAME
++    )  # type: Optional[Distribution]
++
++    resolved_pip = None  # type: Optional[Distribution]
++    to_remove_pins = set()  # type: Set[Tuple[ProjectName, Version]]
++    to_install = []  # type: List[Distribution]
++    for distribution in distributions:
++        if SyncTarget._PIP_PROJECT_NAME == distribution.metadata.project_name:
++            resolved_pip = distribution
++        existing_distribution = existing_distributions_by_project_name.pop(
++            distribution.metadata.project_name, None
++        )
++        if not existing_distribution:
++            to_install.append(distribution)
++        elif existing_distribution.metadata.version != distribution.metadata.version:
++            to_remove_pins.add(
++                (
++                    existing_distribution.metadata.project_name,
++                    existing_distribution.metadata.version,
++                )
++            )
++            to_install.append(distribution)
++    if retain_pip:
++        existing_distributions_by_project_name.pop(SyncTarget._PIP_PROJECT_NAME, None)
++    for extra_distribution in existing_distributions_by_project_name.values():
++        to_remove_pins.add(
++            (extra_distribution.metadata.project_name, extra_distribution.metadata.version)
++        )
++
++    to_unlink_by_pin = OrderedDict()  # type: OrderedDict[Tuple[ProjectName, Version], List[Text]]
++    for distribution in venv.iter_distributions():
++        pin = (distribution.metadata.project_name, distribution.metadata.version)
++        if pin not in to_remove_pins:
++            continue
++        to_unlink = []  # type: List[Text]
++        if distribution.metadata.type is MetadataType.DIST_INFO:
++            to_unlink.extend(
++                os.path.realpath(os.path.join(distribution.location, installed_file.path))
++                for installed_file in Record.read(lines=distribution.iter_metadata_lines("RECORD"))
++                if isinstance(installed_file, InstalledFile)
++            )
++        elif distribution.metadata.type is MetadataType.EGG_INFO:
++            installed_files = distribution.metadata.files.metadata_file_rel_path(
++                "installed-files.txt"
++            )
++            if installed_files:
++                base_dir = os.path.realpath(
++                    os.path.join(distribution.location, os.path.dirname(installed_files))
++                )
++                to_unlink.extend(
++                    os.path.join(base_dir, path)
++                    for path in distribution.iter_metadata_lines("installed-files.txt")
++                )
++                # Pip generates "installed-files.txt" upon installing and this file does not
++                # include itself; so we tack that on here ourselves.
++                to_unlink.append(
++                    os.path.realpath(os.path.join(distribution.location, installed_files))
++                )
++        if to_unlink:
++            abs_venv_dir = os.path.realpath(venv.venv_dir)
++            to_unlink_by_pin[pin] = [
++                file for file in to_unlink if abs_venv_dir == safe_commonpath((abs_venv_dir, file))
++            ]
++    if confirm and to_unlink_by_pin:
++        for (project_name, version), files in to_unlink_by_pin.items():
++            print(project_name, version, ":", file=sys.stderr)
++            for f in files:
++                print("    ", f, file=sys.stderr)
++        if input(
++            "Remove the outdated distributions listed above from the venv at "
++            "{venv}? [yN]: ".format(venv=venv.venv_dir)
++        ).strip().lower() not in ("y", "yes"):
++            return Error("Sync cancelled.")
++
++    return VenvSyncPlan(
++        to_install=tuple(to_install),
++        remove_pins=frozenset(to_remove_pins),
++        expected_pins=frozenset(
++            (distribution.metadata.project_name, distribution.metadata.version)
++            for distribution in distributions
++        ),
++        retain_pip=retain_pip,
++        ensure_pip=bool(retain_pip and not resolved_pip and not installed_pip),
++    )
++
++
++def _apply_venv_sync(
++    venv,  # type: Virtualenv
++    plan,  # type: VenvSyncPlan
++):
++    # type: (...) -> None
++
++    abs_venv_dir = os.path.realpath(venv.venv_dir)
++    to_unlink = []  # type: List[Text]
++    for distribution in venv.iter_distributions(rescan=True):
++        if (distribution.metadata.project_name, distribution.metadata.version) in plan.remove_pins:
+             if distribution.metadata.type is MetadataType.DIST_INFO:
+                 to_unlink.extend(
+                     os.path.realpath(os.path.join(distribution.location, installed_file.path))
+@@ -321,60 +430,73 @@ class SyncTarget(object):
+                         os.path.join(base_dir, path)
+                         for path in distribution.iter_metadata_lines("installed-files.txt")
+                     )
+-                    # Pip generates "installed-files.txt" upon installing and this file does not
+-                    # include itself; so we tack that on here ourselves.
+                     to_unlink.append(
+                         os.path.realpath(os.path.join(distribution.location, installed_files))
+                     )
+-            if to_unlink:
+-                to_unlink_by_pin[
+-                    (distribution.metadata.project_name, distribution.metadata.version)
+-                ] = [
+-                    file
+-                    for file in to_unlink
+-                    if abs_venv_dir == safe_commonpath((abs_venv_dir, file))
+-                ]
+-        if confirm and to_unlink_by_pin:
+-            for (project_name, version), files in to_unlink_by_pin.items():
+-                print(project_name, version, ":", file=sys.stderr)
+-                for f in files:
+-                    print("    ", f, file=sys.stderr)
+-            if input(
+-                "Remove the outdated distributions listed above from the venv at "
+-                "{venv}? [yN]: ".format(venv=self.venv.venv_dir)
+-            ).strip().lower() not in ("y", "yes"):
+-                return Error("Sync cancelled.")
+-
+-        if to_unlink_by_pin:
+-            parent_dirs = set()  # type: Set[Text]
+-            for file in itertools.chain.from_iterable(to_unlink_by_pin.values()):
+-                safe_delete(file)
+-                parent_dirs.add(os.path.dirname(file))
+-            for parent_dir in sorted(parent_dirs, reverse=True):
+-                if not os.listdir(parent_dir) and abs_venv_dir == safe_commonpath(
+-                    (abs_venv_dir, parent_dir)
+-                ):
+-                    os.rmdir(parent_dir)
+-
+-        if retain_pip and not resolved_pip and not installed_pip:
+-            self.venv.ensure_pip(upgrade=True)
+-
+-        if to_install:
+-            for distribution in to_install:
+-                for src, dst in reinstall_venv(
+-                    installed_wheel=InstalledWheel.load(distribution.location), venv=self.venv
+-                ):
+-                    TRACER.log("Installed {src} -> {dst}".format(src=src, dst=dst))
+-            for script in self.venv.rewrite_scripts():
+-                TRACER.log("Re-wrote script shebang for {script}".format(script=script))
++    if to_unlink:
++        parent_dirs = set()  # type: Set[Text]
++        for file in to_unlink:
++            safe_delete(file)
++            parent_dirs.add(os.path.dirname(file))
++        for parent_dir in sorted(parent_dirs, reverse=True):
++            if not os.path.exists(parent_dir) or os.listdir(parent_dir):
++                continue
++            if abs_venv_dir == safe_commonpath((abs_venv_dir, parent_dir)):
++                os.rmdir(parent_dir)
+ 
+-        if self.command:
+-            try:
+-                safe_execv(self.command)
+-            except OSError as e:
+-                return Error("Failed to execute {exe}: {err}".format(exe=self.command[0], err=e))
++    if plan.ensure_pip:
++        venv.ensure_pip(upgrade=True)
+ 
+-        return Ok()
++    if plan.to_install:
++        for distribution in plan.to_install:
++            for src, dst in reinstall_venv(
++                installed_wheel=InstalledWheel.load(distribution.location), venv=venv
++            ):
++                TRACER.log("Installed {src} -> {dst}".format(src=src, dst=dst))
++
++
++def _verify_venv_sync(
++    venv,  # type: Virtualenv
++    plan,  # type: VenvSyncPlan
++):
++    # type: (...) -> Result
++
++    expected = set(plan.expected_pins)  # type: Set[Tuple[ProjectName, Version]]
++    actual = {
++        (distribution.metadata.project_name, distribution.metadata.version)
++        for distribution in venv.iter_distributions(rescan=True)
++    }  # type: Set[Tuple[ProjectName, Version]]
++
++    def mismatch_error(detail):
++        # type: (str) -> Error
++        return Error(
++            "The synced venv at {venv} does not match the lock. {detail}".format(
++                venv=venv.venv_dir, detail=detail
++            )
++        )
++
++    if plan.retain_pip:
++        # A retained Pip (and its ensurepip companions: Setuptools / Wheel on old Pythons) is
++        # managed outside the lock; allow exactly those extra pins.
++        extras = actual - expected
++        if not expected.issubset(actual) or any(
++            project_name not in VenvSyncPlan.RETAINED_PIP_COMPANIONS
++            for project_name, _ in extras
++        ):
++            return mismatch_error(
++                "Missing: {missing}; extra: {extra}".format(
++                    missing=sorted(str(p) for p in expected - actual),
++                    extra=sorted(str(p) for p in extras),
++                )
++            )
++    elif actual != expected:
++        return mismatch_error(
++            "Missing: {missing}; extra: {extra}".format(
++                missing=sorted(str(p) for p in expected - actual),
++                extra=sorted(str(p) for p in actual - expected),
++            )
++        )
++    return Ok()
+ 
+ 
+ @attr.s(frozen=True)
+@@ -1899,8 +2021,12 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
+         lock_update,  # type: LockUpdate
+         lock_file,  # type: Lockfile
+         lock_file_path,  # type: str
++        lock_output_path=None,  # type: Optional[str]
+     ):
+         # type: (...) -> Result
++        # When `lock_output_path` is None the lock is rewritten in place at `lock_file_path`;
++        # sync passes a staged candidate path that is only switched into `lock_file_path` once the
++        # matching venv is also ready.
+ 
+         original_requirements_by_project_name = (
+             OrderedDict()
+@@ -2183,7 +2309,7 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
+         if dry_run:
+             return Error() if dry_run is DryRunStyle.CHECK else Ok()
+ 
+-        with open(lock_file_path, "w") as fp:
++        with open(lock_output_path or lock_file_path, "w") as fp:
+             self._dump_lockfile(
+                 lock_file=attr.evolve(
+                     lock_file,
+@@ -2264,15 +2390,91 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
+ 
+         return self._process_lock_update(lock_update, lock_file, lock_file_path)
+ 
+-    def _sync(self):
+-        # type: () -> Result
++    def _select_venv_creation_interpreter(self, pip_configuration):
++        # type: (PipConfiguration) -> Union[PythonInterpreter, Error]
++        if self.options.venv_python:
++            if os.path.isfile(self.options.venv_python):
++                return PythonInterpreter.from_binary(self.options.venv_python)
++            interpreter = PythonInterpreter.from_env(self.options.venv_python)
++            if interpreter is None:
++                return Error(
++                    "Could not find an interpreter matching {venv_python} to create the venv "
++                    "{venv}.".format(venv_python=self.options.venv_python, venv=self.options.venv)
++                )
++            return interpreter
++
++        targets = target_options.configure(
++            self.options, pip_configuration=pip_configuration
++        ).resolve_targets()
++        if isinstance(targets, Error):
++            return targets
++        interpreters = [
++            target.get_interpreter()
++            for target in targets.unique_targets()
++            if isinstance(target, LocalInterpreter)
++        ]
++        interpreter = interpreters[0] if len(interpreters) == 1 else None
++        if interpreter is None:
++            return Error(
++                "In order to create the venv {venv} the sync operation needs to know "
++                "which interpreter to use to create it.\n"
++                "Use `--venv-interpreter` to select an interpreter for venv creation.".format(
++                    venv=self.options.venv
++                )
++            )
++        return interpreter
++
++    def _resolve_venv_distributions(
++        self,
++        lock_file,  # type: Lockfile
++        interpreter,  # type: PythonInterpreter
++        pip_configuration,  # type: PipConfiguration
++        requirement_configuration,  # type: RequirementConfiguration
++        dependency_config,  # type: DependencyConfiguration
++    ):
++        # type: (...) -> Union[List[Distribution], Error]
++        target = LocalInterpreter.create(interpreter)
++        resolve_result = resolve_from_pex_lock(
++            targets=Targets.from_target(target),
++            lock=lock_file,
++            resolver=ConfiguredResolver(pip_configuration),
++            requirements=requirement_configuration.requirements,
++            requirement_files=requirement_configuration.requirement_files,
++            constraint_files=requirement_configuration.constraint_files,
++            repos_configuration=pip_configuration.repos_configuration,
++            resolver_version=pip_configuration.resolver_version,
++            network_configuration=pip_configuration.network_configuration,
++            build_configuration=pip_configuration.build_configuration,
++            transitive=pip_configuration.transitive,
++            max_parallel_jobs=pip_configuration.max_jobs,
++            pip_version=pip_configuration.version,
++            use_pip_config=pip_configuration.use_pip_config,
++            extra_pip_requirements=pip_configuration.extra_requirements,
++            keyring_provider=pip_configuration.keyring_provider,
++            result_type=InstallableType.INSTALLED_WHEEL_CHROOT,
++            dependency_configuration=dependency_config,
++        )
++        if isinstance(resolve_result, Error):
++            return resolve_result
++        return [
++            resolved_distribution.distribution
++            for resolved_distribution in resolve_result.distributions
++            if resolved_distribution.target == target
++        ]
++
++    def _sync_dry_run(
++        self,
++        lock_file_path,  # type: str
++        pip_configuration,  # type: PipConfiguration
++        locking_configuration,  # type: LockingConfiguration
++        dependency_config,  # type: DependencyConfiguration
++        venv_dir,  # type: Optional[str]
++        existing_venv,  # type: Optional[Virtualenv]
++        create_interpreter,  # type: Optional[PythonInterpreter]
++        command_args,  # type: Optional[Tuple[str, ...]]
++    ):
++        # type: (...) -> Result
+ 
+-        resolver_configuration = resolver_options.configure(self.options, use_system_time=False)
+-        production_assert(isinstance(resolver_configuration, LockRepositoryConfiguration))
+-        pip_configuration = resolver_configuration.pip_configuration
+-        locking_configuration = try_(self._locking_configuration(pip_configuration))
+-        dependency_config = dependency_configuration.configure(self.options)
+-        lock_file_path = self.options.lock
+         if os.path.exists(lock_file_path):
+             lock_configuration = locking_configuration.lock_configuration
+             build_configuration = pip_configuration.build_configuration
+@@ -2320,7 +2522,9 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
+             if isinstance(lock_update, Result):
+                 return lock_update
+ 
+-            try_(self._process_lock_update(lock_update, lock_file, lock_file_path))
++            update_result = self._process_lock_update(lock_update, lock_file, lock_file_path)
++            if isinstance(update_result, Error):
++                return update_result
+         else:
+             targets = try_(
+                 self._resolve_targets(
+@@ -2350,114 +2554,338 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
+                     avoid_downloads=self.options.avoid_downloads,
+                 )
+             )
+-            if self.options.dry_run:
+-                output = sys.stdout if self.options.dry_run is DryRunStyle.DISPLAY else sys.stderr
+-                for locked_resolve in lockfile.locked_resolves:
++            output = sys.stdout if self.options.dry_run is DryRunStyle.DISPLAY else sys.stderr
++            for locked_resolve in lockfile.locked_resolves:
++                print(
++                    "Would lock {count} {project} for platform {platform}:".format(
++                        count=len(locked_resolve.locked_requirements),
++                        project=pluralize(locked_resolve.locked_requirements, "project"),
++                        platform=locked_resolve.target_platform,
++                    ),
++                    file=output,
++                )
++                for locked_requirement in locked_resolve.locked_requirements:
+                     print(
+-                        "Would lock {count} {project} for platform {platform}:".format(
+-                            count=len(locked_resolve.locked_requirements),
+-                            project=pluralize(locked_resolve.locked_requirements, "project"),
+-                            platform=locked_resolve.target_platform,
++                        "  {project_name} {version}".format(
++                            project_name=locked_requirement.pin.project_name,
++                            version=locked_requirement.pin.version,
+                         ),
+                         file=output,
+                     )
+-                    for locked_requirement in locked_resolve.locked_requirements:
+-                        print(
+-                            "  {project_name} {version}".format(
+-                                project_name=locked_requirement.pin.project_name,
+-                                version=locked_requirement.pin.version,
+-                            ),
+-                            file=output,
+-                        )
+-            else:
+-                with safe_open(lock_file_path, "w") as fp:
+-                    self._dump_lockfile(lockfile, output=fp)
+ 
+         sync_target = None  # type: Optional[SyncTarget]
++        if venv_dir is not None:
++            venv = existing_venv or Virtualenv.create(venv_dir, interpreter=create_interpreter)
++            sync_target = SyncTarget.resolve_command(venv=venv, command=command_args)
++        elif command_args is not None:
++            assert self.passthrough_args
++            sync_target = try_(
++                SyncTarget.resolve_venv(self.passthrough_args[0], *self.passthrough_args[1:])
++            )
++        if not sync_target:
++            return Ok()
++
++        would_update_venv_msg = "Would sync venv at {venv}".format(venv=sync_target.venv.venv_dir)
++        if sync_target.command:
++            return Ok(
++                "\n".join(
++                    (
++                        would_update_venv_msg + " and run the following command in it:",
++                        "  " + " ".join(shlex_quote(arg) for arg in sync_target.command),
++                    )
++                )
++            )
++        return Ok(would_update_venv_msg + ".")
++
++    def _sync(self):
++        # type: () -> Result
++
++        resolver_configuration = resolver_options.configure(self.options, use_system_time=False)
++        production_assert(isinstance(resolver_configuration, LockRepositoryConfiguration))
++        pip_configuration = resolver_configuration.pip_configuration
++        locking_configuration = try_(self._locking_configuration(pip_configuration))
++        dependency_config = dependency_configuration.configure(self.options)
++        lock_file_path = os.path.abspath(self.options.lock)
++
++        # Preflight the venv this lock will be paired with. None of this creates anything: an
++        # explicit --venv is validated if present or its creation interpreter is selected, and a
++        # passthrough command resolves to an enclosing venv that must already exist.
++        venv_dir = None  # type: Optional[str]
++        preflight_venv = None  # type: Optional[Virtualenv]
++        create_interpreter = None  # type: Optional[PythonInterpreter]
++        command_args = None  # type: Optional[Tuple[str, ...]]
+         if self.options.venv:
+-            if os.path.exists(self.options.venv):
++            venv_dir = os.path.realpath(self.options.venv)
++            if os.path.exists(venv_dir):
+                 try:
+-                    venv = Virtualenv(self.options.venv)
++                    preflight_venv = Virtualenv(venv_dir)
+                 except InvalidVirtualenvError as e:
+                     return Error("The given --venv is not a valid venv: {err}".format(err=e))
+             else:
+-                if self.options.venv_python:
+-                    interpreter = (
+-                        PythonInterpreter.from_binary(self.options.venv_python)
+-                        if os.path.isfile(self.options.venv_python)
+-                        else PythonInterpreter.from_env(self.options.venv_python)
+-                    )
+-                else:
+-                    targets = target_options.configure(
+-                        self.options, pip_configuration=pip_configuration
+-                    ).resolve_targets()
+-                    interpreters = [
+-                        target.get_interpreter()
+-                        for target in targets.unique_targets()
+-                        if isinstance(target, LocalInterpreter)
+-                    ]
+-                    if len(interpreters) != 1:
+-                        return Error(
+-                            "In order to create the venv {venv} the sync operation needs to know "
+-                            "which interpreter to use to create it.\n"
+-                            "Use `--venv-interpreter` to select an interpreter for venv creation."
+-                        )
+-                    interpreter = interpreters[0]
+-                venv = Virtualenv.create(self.options.venv, interpreter=interpreter)
+-            sync_target = SyncTarget.resolve_command(venv=venv, command=self.passthrough_args)
++                create_interpreter = try_(self._select_venv_creation_interpreter(pip_configuration))
++            if self.passthrough_args:
++                command_args = tuple(self.passthrough_args)
+         elif self.passthrough_args:
+-            sync_target = try_(
++            passthrough_target = try_(
+                 SyncTarget.resolve_venv(self.passthrough_args[0], *self.passthrough_args[1:])
+             )
+-        if not sync_target:
+-            return Ok()
++            preflight_venv = passthrough_target.venv
++            venv_dir = os.path.realpath(preflight_venv.venv_dir)
++            command_args = passthrough_target.command
+ 
+         if self.options.dry_run:
+-            would_update_venv_msg = "Would sync venv at {venv}".format(
+-                venv=sync_target.venv.venv_dir
+-            )
+-            if sync_target.command:
+-                return Ok(
+-                    "\n".join(
+-                        (
+-                            would_update_venv_msg + " and run the following command in it:",
+-                            "  " + " ".join(shlex_quote(arg) for arg in sync_target.command),
++            return self._sync_dry_run(
++                lock_file_path=lock_file_path,
++                pip_configuration=pip_configuration,
++                locking_configuration=locking_configuration,
++                dependency_config=dependency_config,
++                venv_dir=venv_dir,
++                existing_venv=preflight_venv,
++                create_interpreter=create_interpreter,
++                command_args=command_args,
++            )
++
++        # All concurrent syncs for this lock path (and thus its paired venv) share one
++        # publication owner. Contenders block here and recover any dead generation before
++        # recomputing against the committed files.
++        publication = SyncPublication(lock_path=lock_file_path, venv_dir=venv_dir)
++        publication.acquire()
++        published = False
++        try:
++            try:
++                # Re-check under the lock: a competing owner that just finished may already have
++                # created either resource.
++                venv_existed = venv_dir is not None and os.path.isdir(venv_dir)
++                publication.staging(venv_existed=venv_existed)
++
++                requirement_configuration = None  # type: Optional[RequirementConfiguration]
++                if os.path.exists(lock_file_path):
++                    build_configuration = pip_configuration.build_configuration
++                    original_lock_file = try_(
++                        parse_lockfile(self.options, lock_file_path=lock_file_path)
++                    )
++                    lock_file = attr.evolve(
++                        original_lock_file,
++                        configuration=locking_configuration.lock_configuration,
++                        pip_version=pip_configuration.version,
++                        resolver_version=pip_configuration.resolver_version,
++                        allow_prereleases=pip_configuration.allow_prereleases,
++                        allow_wheels=build_configuration.allow_wheels,
++                        only_wheels=SortedTuple(build_configuration.only_wheels),
++                        allow_builds=build_configuration.allow_builds,
++                        only_builds=SortedTuple(build_configuration.only_builds),
++                        prefer_older_binary=build_configuration.prefer_older_binary,
++                        use_pep517=build_configuration.use_pep517,
++                        build_isolation=build_configuration.build_isolation,
++                        transitive=pip_configuration.transitive,
++                        excluded=SortedTuple(dependency_config.excluded),
++                        overridden=SortedTuple(dependency_config.all_overrides()),
++                    )
++                    lock_update_request = try_(
++                        self._create_lock_update_request(
++                            lock_file_path=lock_file_path,
++                            lock_file=lock_file,
++                            dependency_config=dependency_config,
++                        )
++                    )
++                    try_(locking_configuration.check_scripts(lock_update_request.targets))
++                    pip_configuration = try_(
++                        finalize_resolve_config(
++                            resolver_configuration=pip_configuration,
++                            targets=lock_update_request.targets,
++                            context="lock syncing",
++                        )
++                    )
++                    requirement_configuration = self._merge_project_requirements(
++                        locking_configuration.requirement_configuration,
++                        pip_configuration,
++                        lock_update_request.targets,
++                    )
++                    lock_update = lock_update_request.sync(
++                        requirement_configuration=requirement_configuration,
++                    )
++                    if isinstance(lock_update, Result):
++                        publication.abort()
++                        return lock_update
++
++                    update_result = self._process_lock_update(
++                        lock_update,
++                        lock_file,
++                        lock_file_path,
++                        lock_output_path=publication.lock_candidate_path,
++                    )
++                    if isinstance(update_result, Error):
++                        publication.abort()
++                        return update_result
++                else:
++                    targets = try_(
++                        self._resolve_targets(
++                            action="creating",
++                            style=self.options.style,
++                            target_configuration=locking_configuration.target_configuration,
++                        )
++                    )
++                    try_(locking_configuration.check_scripts(targets))
++                    pip_configuration = try_(
++                        finalize_resolve_config(
++                            resolver_configuration=pip_configuration,
++                            targets=targets,
++                            context="lock creation",
++                        )
++                    )
++                    requirement_configuration = self._merge_project_requirements(
++                        locking_configuration.requirement_configuration, pip_configuration, targets
++                    )
++                    lockfile = try_(
++                        create(
++                            lock_configuration=locking_configuration.lock_configuration,
++                            requirement_configuration=requirement_configuration,
++                            targets=targets,
++                            pip_configuration=pip_configuration,
++                            dependency_configuration=dependency_config,
++                            avoid_downloads=self.options.avoid_downloads,
+                         )
+                     )
++                    with safe_open(publication.lock_candidate_path, "w") as fp:
++                        self._dump_lockfile(lockfile, output=fp)
++
++                lock_changed = os.path.exists(publication.lock_candidate_path)
++                production_assert(
++                    requirement_configuration is not None,
++                    "The requirement configuration must be finalized before syncing a venv.",
++                )
++
++                if venv_dir is None:
++                    # Lock-only sync. Nothing to pair: publish the staged lock if it changed and
++                    # otherwise leave everything untouched.
++                    if lock_changed:
++                        publication.prepared()
++                        publication.commit()
++                        published = True
++                    else:
++                        publication.abort()
++                    return Ok()
++
++                if venv_existed:
++                    live_venv = preflight_venv
++                    if live_venv is None or os.path.realpath(live_venv.venv_dir) != venv_dir:
++                        # The venv appeared (or changed hands) while we waited for the owner lock.
++                        live_venv = Virtualenv(venv_dir)
++
++                    # Resolve against the staged lock when it changed, else the committed one;
++                    # both describe the generation that is about to be published.
++                    distributions = try_(
++                        self._resolve_venv_distributions(
++                            lock_file=try_(
++                                parse_lockfile(
++                                    self.options,
++                                    lock_file_path=(
++                                        publication.lock_candidate_path
++                                        if lock_changed
++                                        else lock_file_path
++                                    ),
++                                )
++                            ),
++                            interpreter=live_venv.interpreter,
++                            pip_configuration=pip_configuration,
++                            requirement_configuration=requirement_configuration,
++                            dependency_config=dependency_config,
++                        )
++                    )
++                    # Plan against the live venv so the confirmation prompt names the paths the
++                    # user knows and a fully up-to-date venv costs no staging work.
++                    plan = _plan_venv_sync(
++                        live_venv,
++                        distributions,
++                        confirm=not self.options.yes,
++                        retain_pip=self.options.pip,
++                    )
++                    if isinstance(plan, Error):
++                        publication.abort()
++                        return plan
++
++                    if not lock_changed and plan.is_noop:
++                        # The committed generation already matches; no switch needed.
++                        publication.abort()
++                    else:
++                        if not lock_changed:
++                            # The lock content is unchanged but the venv must move; publish the
++                            # unchanged lock as part of the same generation so the pair is always
++                            # committed together.
++                            shutil.copyfile(lock_file_path, publication.lock_candidate_path)
++                        publication.clone_existing_venv(venv_dir)
++                        candidate_venv = Virtualenv(publication.venv_candidate_dir)
++                        _apply_venv_sync(candidate_venv, plan)
++                        candidate_venv.rewrite_for_target_dir(real_venv_dir=venv_dir)
++                        verify_result = _verify_venv_sync(candidate_venv, plan)
++                        if isinstance(verify_result, Error):
++                            publication.abort()
++                            return verify_result
++                        publication.prepared()
++                        publication.commit()
++                        published = True
++                else:
++                    # First creation: build the venv at the candidate path, laying it out for the
++                    # final path, and only rename it into place once complete and verified.
++                    candidate_venv = Virtualenv.create(
++                        publication.venv_candidate_dir, interpreter=create_interpreter
++                    )
++                    candidate_venv.rewrite_for_target_dir(real_venv_dir=venv_dir)
++                    distributions = try_(
++                        self._resolve_venv_distributions(
++                            lock_file=try_(
++                                parse_lockfile(
++                                    self.options,
++                                    lock_file_path=publication.lock_candidate_path,
++                                )
++                            ),
++                            interpreter=candidate_venv.interpreter,
++                            pip_configuration=pip_configuration,
++                            requirement_configuration=requirement_configuration,
++                            dependency_config=dependency_config,
++                        )
++                    )
++                    plan = _plan_venv_sync(
++                        candidate_venv,
++                        distributions,
++                        confirm=False,
++                        retain_pip=self.options.pip,
++                    )
++                    if isinstance(plan, Error):
++                        publication.abort()
++                        return plan
++                    if not lock_changed:
++                        # The lock existed before we acquired ownership but had no venv yet; pair
++                        # the existing lock content with the new venv generation.
++                        shutil.copyfile(lock_file_path, publication.lock_candidate_path)
++                    _apply_venv_sync(candidate_venv, plan)
++                    candidate_venv.rewrite_for_target_dir(real_venv_dir=venv_dir)
++                    verify_result = _verify_venv_sync(candidate_venv, plan)
++                    if isinstance(verify_result, Error):
++                        publication.abort()
++                        return verify_result
++                    publication.prepared()
++                    publication.commit()
++                    published = True
++            except BaseException:
++                if not published:
++                    publication.abort()
++                raise
++        finally:
++            publication.release()
++
++        # The matching generation is committed. Run the post-sync command, if any, against the
++        # published venv. The command runs after publication; its exit code is never a reason to
++        # roll the committed generation back.
++        if command_args is not None:
++            if self.options.venv:
++                final_target = SyncTarget.resolve_command(
++                    venv=Virtualenv(venv_dir), command=command_args
+                 )
+             else:
+-                return Ok(would_update_venv_msg + ".")
+-
+-        lock_file = try_(parse_lockfile(self.options, lock_file_path=lock_file_path))
+-        target = LocalInterpreter.create(sync_target.venv.interpreter)
+-        resolve_result = try_(
+-            resolve_from_pex_lock(
+-                targets=Targets.from_target(target),
+-                lock=lock_file,
+-                resolver=ConfiguredResolver(pip_configuration),
+-                requirements=requirement_configuration.requirements,
+-                requirement_files=requirement_configuration.requirement_files,
+-                constraint_files=requirement_configuration.constraint_files,
+-                repos_configuration=pip_configuration.repos_configuration,
+-                resolver_version=pip_configuration.resolver_version,
+-                network_configuration=pip_configuration.network_configuration,
+-                build_configuration=pip_configuration.build_configuration,
+-                transitive=pip_configuration.transitive,
+-                max_parallel_jobs=pip_configuration.max_jobs,
+-                pip_version=pip_configuration.version,
+-                use_pip_config=pip_configuration.use_pip_config,
+-                extra_pip_requirements=pip_configuration.extra_requirements,
+-                keyring_provider=pip_configuration.keyring_provider,
+-                result_type=InstallableType.INSTALLED_WHEEL_CHROOT,
+-                dependency_configuration=dependency_config,
+-            )
+-        )
+-        return sync_target.sync(
+-            distributions=[
+-                resolved_distribution.distribution
+-                for resolved_distribution in resolve_result.distributions
+-                if resolved_distribution.target == target
+-            ],
+-            confirm=not self.options.yes,
+-            retain_pip=self.options.pip,
+-        )
++                assert self.passthrough_args
++                final_target = try_(
++                    SyncTarget.resolve_venv(self.passthrough_args[0], *self.passthrough_args[1:])
++                )
++            return final_target.run_command()
++        return Ok()
+diff --git a/pex/venv/virtualenv.py b/pex/venv/virtualenv.py
+index 08ab8b7c..656ed844 100644
+--- a/pex/venv/virtualenv.py
++++ b/pex/venv/virtualenv.py
+@@ -365,30 +365,7 @@ class Virtualenv(object):
+             install_wheel=install_wheel,
+             other_installs=other_installs,
+         )
+-        for script in virtualenv._rewrite_base_scripts(real_venv_dir=venv_dir.target_dir):
+-            TRACER.log("Re-writing {}".format(script))
+-
+-        # It's known that PyPy's 7.3.14 releases create venvs with absolute symlinks in bin/ to
+-        # bin/ local files, which leaves invalid symlinks to the atomic workdir. We fix that up
+-        # here. See: https://github.com/pypy/pypy/issues/4838
+-        for path in os.listdir(virtualenv.bin_dir):
+-            abs_path = os.path.join(virtualenv.bin_dir, path)
+-            if not os.path.islink(abs_path):
+-                continue
+-            link_target = os.readlink(abs_path)
+-            if not os.path.isabs(link_target):
+-                continue
+-            if virtualenv.bin_dir == safe_commonpath((virtualenv.bin_dir, link_target)):
+-                rel_dst = os.path.relpath(link_target, virtualenv.bin_dir)
+-                TRACER.log(
+-                    "Replacing absolute symlink {src} -> {dst} with relative symlink".format(
+-                        src=abs_path, dst=link_target
+-                    ),
+-                    V=3,
+-                )
+-                os.unlink(abs_path)
+-                safe_symlink(rel_dst, abs_path)
+-
++        virtualenv.rewrite_for_target_dir(real_venv_dir=venv_dir.target_dir)
+         return virtualenv
+ 
+     def __init__(
+@@ -532,6 +509,37 @@ class Virtualenv(object):
+                     else:
+                         sys.stdout.write(line)
+ 
++    def rewrite_for_target_dir(self, real_venv_dir):
++        # type: (str) -> None
++        """Rewrite a venv built at a staging path for life at `real_venv_dir`.
++
++        Rewrites shebangs / activate scripts and repairs intra-venv absolute symlinks so the venv
++        can be renamed from its staging (work) directory to `real_venv_dir` and work as-is.
++        """
++        for script in self._rewrite_base_scripts(real_venv_dir=real_venv_dir):
++            TRACER.log("Re-writing {}".format(script))
++
++        # It's known that PyPy's 7.3.14 releases create venvs with absolute symlinks in bin/ to
++        # bin/ local files, which leaves invalid symlinks to the staging workdir. We fix that up
++        # here. See: https://github.com/pypy/pypy/issues/4838
++        for path in os.listdir(self.bin_dir):
++            abs_path = os.path.join(self.bin_dir, path)
++            if not os.path.islink(abs_path):
++                continue
++            link_target = os.readlink(abs_path)
++            if not os.path.isabs(link_target):
++                continue
++            if self.bin_dir == safe_commonpath((self.bin_dir, link_target)):
++                rel_dst = os.path.relpath(link_target, self.bin_dir)
++                TRACER.log(
++                    "Replacing absolute symlink {src} -> {dst} with relative symlink".format(
++                        src=abs_path, dst=link_target
++                    ),
++                    V=3,
++                )
++                os.unlink(abs_path)
++                safe_symlink(rel_dst, abs_path)
++
+     def _rewrite_base_scripts(self, real_venv_dir):
+         # type: (str) -> Iterator[str]
+         scripts = [
+diff --git a/tests/integration/cli/commands/test_lock_sync.py b/tests/integration/cli/commands/test_lock_sync.py
+index d4b08c39..3999b24d 100644
+--- a/tests/integration/cli/commands/test_lock_sync.py
++++ b/tests/integration/cli/commands/test_lock_sync.py
+@@ -4,10 +4,12 @@
+ from __future__ import print_function
+ 
+ import filecmp
++import os
+ import os.path
+ import re
+ import shutil
+ import sys
++import threading
+ from textwrap import dedent
+ 
+ import pytest
+@@ -1502,3 +1504,138 @@ def test_sync_multiple_top_level_requirements_for_single_project(tmpdir):
+     assert_sync()
+     assert_sync("paramiko>=3.5.0", "paramiko>=3.5.0,<=4.0.0")
+     assert_sync("paramiko>=3.5.0,<=4.0.0", "paramiko>=3.5.0")
++
++
++def assert_no_sync_leftovers(path):
++    # type: (str) -> None
++    parent = os.path.dirname(path)
++    leftovers = [
++        name
++        for name in os.listdir(parent)
++        if name.endswith(".pex-sync-work") or name.endswith(".pex-sync-old")
++    ]
++    assert [] == leftovers, leftovers
++    state_dir = os.path.join(parent, ".{name}.pex-sync".format(name=os.path.basename(path)))
++    if os.path.isdir(state_dir):
++        pending = [name for name in os.listdir(state_dir) if name.startswith("pending.")]
++        assert [] == pending, pending
++
++
++def test_sync_failure_pair_intact(
++    tmpdir,  # type: Any
++    repo_args,  # type: List[str]
++    path_mappings,  # type: PathMappings
++):
++    # type: (...) -> None
++
++    # A sync that fails to resolve must leave the previously committed lock and venv usable as a
++    # matching pair; it must never publish one resource without the other.
++    lock = os.path.join(str(tmpdir), "lock.json")
++    venv_dir = os.path.join(str(tmpdir), "venv")
++    run_sync("cowsay==5.0", "--lock", lock, "--venv", venv_dir, *repo_args).assert_success()
++    assert_lock_matches_venv(
++        lock=lock,
++        path_mappings=path_mappings,
++        venv=venv_dir,
++        expected_pins=[pin("cowsay", "5.0")],
++    )
++
++    run_sync(
++        "cowsay==5.0",
++        "this-dist-does-not-exist-zzz",
++        "--yes",
++        "--lock",
++        lock,
++        "--venv",
++        venv_dir,
++        *repo_args,
++    ).assert_failure()
++
++    assert_lock_matches_venv(
++        lock=lock,
++        path_mappings=path_mappings,
++        venv=venv_dir,
++        expected_pins=[pin("cowsay", "5.0")],
++    )
++    # The old venv is still a working venv, not a half-installed one.
++    assert b"| Moo! |" in subprocess.check_output(
++        args=[Virtualenv(venv_dir).bin_path("cowsay"), "Moo!"]
++    )
++    assert_no_sync_leftovers(lock)
++    assert_no_sync_leftovers(venv_dir)
++
++
++def test_first_create_failure_clean(
++    tmpdir,  # type: Any
++    repo_args,  # type: List[str]
++):
++    # type: (...) -> None
++
++    # A first create that fails must not leave anything a later call could mistake for a
++    # committed lock or venv.
++    lock = os.path.join(str(tmpdir), "lock.json")
++    venv_dir = os.path.join(str(tmpdir), "venv")
++    run_sync(
++        "this-dist-does-not-exist-zzz", "--lock", lock, "--venv", venv_dir, *repo_args
++    ).assert_failure()
++
++    assert not os.path.exists(lock)
++    assert not os.path.exists(venv_dir)
++    assert_no_sync_leftovers(lock)
++    assert_no_sync_leftovers(venv_dir)
++
++
++def test_lock_only_failure_creates_no_lock(
++    tmpdir,  # type: Any
++    repo_args,  # type: List[str]
++):
++    # type: (...) -> None
++
++    lock = os.path.join(str(tmpdir), "lock.json")
++    run_sync("this-dist-does-not-exist-zzz", "--lock", lock, *repo_args).assert_failure()
++    assert not os.path.exists(lock)
++    assert_no_sync_leftovers(lock)
++
++
++def test_concurrent_sync_owner(
++    tmpdir,  # type: Any
++    repo_args,  # type: List[str]
++    path_mappings,  # type: PathMappings
++):
++    # type: (...) -> None
++
++    # Two concurrent syncs for the same lock / venv pair share a single publication owner; one
++    # waits for the other and then reads the committed generation (a no-op) instead of
++    # overwriting either resource itself.
++    lock = os.path.join(str(tmpdir), "lock.json")
++    venv_dir = os.path.join(str(tmpdir), "venv")
++    args = ("cowsay==5.0", "--lock", lock, "--venv", venv_dir) + tuple(repo_args)
++
++    results = []  # type: List[Any]
++    results_guard = threading.Lock()
++
++    def run():
++        result = run_sync(*args)
++        with results_guard:
++            results.append(result)
++
++    threads = [threading.Thread(target=run) for _ in range(2)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join()
++
++    assert 2 == len(results)
++    for result in results:
++        result.assert_success()
++    assert_lock_matches_venv(
++        lock=lock,
++        path_mappings=path_mappings,
++        venv=venv_dir,
++        expected_pins=[pin("cowsay", "5.0")],
++    )
++    assert b"| Moo! |" in subprocess.check_output(
++        args=[Virtualenv(venv_dir).bin_path("cowsay"), "Moo!"]
++    )
++    assert_no_sync_leftovers(lock)
++    assert_no_sync_leftovers(venv_dir)
+diff --git a/tests/test_atomic_sync.py b/tests/test_atomic_sync.py
+new file mode 100644
+index 00000000..a148f2c1
+--- /dev/null
++++ b/tests/test_atomic_sync.py
+@@ -0,0 +1,365 @@
++# Copyright 2026 Pex project contributors.
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++from __future__ import print_function
++
++import os
++import subprocess
++import sys
++import time
++
++from pex.atomic_sync import PHASE_COMMITTING, SyncPublication
++from pex.common import safe_mkdir
++from pex.typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from typing import Any
++
++
++def _state_dir(lock_path):
++    # type: (str) -> str
++    return os.path.join(
++        os.path.dirname(lock_path),
++        ".{name}.pex-sync".format(name=os.path.basename(lock_path)),
++    )
++
++
++def _write(path, content):
++    # type: (str, str) -> None
++    safe_mkdir(os.path.dirname(path) or ".")
++    with open(path, "w") as fp:
++        fp.write(content)
++
++
++def _read(path):
++    # type: (str) -> str
++    with open(path) as fp:
++        return fp.read()
++
++
++def _pending_paths(publication):
++    # type: (SyncPublication) -> list
++    state_dir = _state_dir(publication.lock_path)
++    if not os.path.isdir(state_dir):
++        return []
++    return [
++        os.path.join(state_dir, name)
++        for name in os.listdir(state_dir)
++        if name.startswith("pending.") and name.endswith(".json")
++    ]
++
++
++def _stage_lock(publication, content):
++    # type: (SyncPublication, str) -> None
++    _write(publication.lock_candidate_path, content)
++
++
++def _stage_venv(publication, marker):
++    # type: (SyncPublication, str) -> None
++    os.mkdir(publication.venv_candidate_dir)
++    _write(os.path.join(publication.venv_candidate_dir, "marker"), marker)
++
++
++def _assert_clean_siblings(path):
++    # type: (str) -> None
++    parent = os.path.dirname(path)
++    leftovers = [
++        name
++        for name in os.listdir(parent)
++        if name.endswith(".pex-sync-work") or name.endswith(".pex-sync-old")
++    ]
++    assert [] == leftovers, leftovers
++
++
++def test_lock_only_create_update(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++
++    publication = SyncPublication(lock)
++    publication.acquire()
++    publication.staging()
++    _stage_lock(publication, "v1")
++    publication.prepared()
++    generation = publication.commit()
++    publication.release()
++
++    assert "v1" == _read(lock)
++    assert generation.lock_sha256
++    assert [] == _pending_paths(publication)
++    assert generation.generation == publication.committed_generation().generation
++
++    publication = SyncPublication(lock)
++    publication.acquire()
++    publication.staging()
++    _stage_lock(publication, "v2")
++    publication.prepared()
++    publication.commit()
++    publication.release()
++
++    assert "v2" == _read(lock)
++    _assert_clean_siblings(lock)
++
++
++def test_lock_only_noop(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++    _write(lock, "v0")
++
++    publication = SyncPublication(lock)
++    publication.acquire()
++    publication.staging()
++    # No candidate lock is staged: nothing to publish.
++    publication.abort()
++    publication.release()
++
++    assert "v0" == _read(lock)
++    assert [] == _pending_paths(publication)
++
++
++def test_pair_first_create(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++    venv = tmpdir.join("venv")
++
++    publication = SyncPublication(lock, venv)
++    publication.acquire()
++    publication.staging(venv_existed=False)
++    _stage_lock(publication, "v1")
++    _stage_venv(publication, "venv1")
++    publication.prepared()
++    publication.commit()
++    publication.release()
++
++    assert "v1" == _read(lock)
++    assert "venv1" == _read(os.path.join(venv, "marker"))
++    _assert_clean_siblings(venv)
++
++    generation = SyncPublication(lock, venv).committed_generation()
++    assert generation is not None
++    assert os.path.realpath(venv) == generation.venv_dir
++
++
++def test_existing_venv_switch(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++    venv = tmpdir.join("venv")
++    _write(lock, "v1")
++    os.mkdir(venv)
++    _write(os.path.join(venv, "marker"), "venv1")
++
++    publication = SyncPublication(lock, venv)
++    publication.acquire()
++    publication.staging(venv_existed=True)
++    _stage_lock(publication, "v2")
++    _stage_venv(publication, "venv2")
++
++    # Before the switch neither published resource has changed and a backup has not been taken.
++    assert "v1" == _read(lock)
++    assert "venv1" == _read(os.path.join(venv, "marker"))
++
++    publication.prepared()
++    publication.commit()
++    publication.release()
++
++    assert "v2" == _read(lock)
++    assert "venv2" == _read(os.path.join(venv, "marker"))
++    _assert_clean_siblings(venv)
++
++
++def test_abort_keeps_resources(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++    venv = tmpdir.join("venv")
++    _write(lock, "v1")
++    os.mkdir(venv)
++    _write(os.path.join(venv, "marker"), "venv1")
++
++    publication = SyncPublication(lock, venv)
++    publication.acquire()
++    publication.staging(venv_existed=True)
++    _stage_lock(publication, "v2-broken")
++    _stage_venv(publication, "venv2-broken")
++    # A resolve / install / verification failure aborts the generation.
++    publication.abort()
++    publication.release()
++
++    assert "v1" == _read(lock)
++    assert "venv1" == _read(os.path.join(venv, "marker"))
++    assert [] == _pending_paths(publication)
++    _assert_clean_siblings(venv)
++
++
++def test_failed_create_clean(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++    venv = tmpdir.join("venv")
++
++    publication = SyncPublication(lock, venv)
++    publication.acquire()
++    publication.staging(venv_existed=False)
++    _stage_lock(publication, "v1")
++    _stage_venv(publication, "venv1")
++    publication.abort()
++    publication.release()
++
++    assert not os.path.exists(lock)
++    assert not os.path.exists(venv)
++    assert [] == _pending_paths(publication)
++    _assert_clean_siblings(lock)
++    _assert_clean_siblings(venv)
++
++
++def test_staging_leftovers(tmpdir):
++    # type: (Tempdir) -> None
++
++    lock = tmpdir.join("lock.json")
++    venv = tmpdir.join("venv")
++    _write(lock, "v1")
++    os.mkdir(venv)
++    _write(os.path.join(venv, "marker"), "venv1")
++
++    dead = SyncPublication(lock, venv)
++    dead.acquire()
++    dead.staging(venv_existed=True)
++    _stage_lock(dead, "v2-never-finished")
++    _stage_venv(dead, "venv2-never-finished")
++    pending = dead._pending_path
++    dead.release()  # The owner process dies; staging state is left on disk.
++    del dead
++
++    next_owner = SyncPublication(lock, venv)
++    next_owner.acquire()
++    next_owner.release()
++
++    assert "v1" == _read(lock)
++    assert "venv1" == _read(os.path.join(venv, "marker"))
++    assert not os.path.exists(pending)
++    _assert_clean_siblings(venv)
++
++
++def _crash_in_committing(
++    tmpdir,  # type: Any
++    venv_existed,  # type: bool
++    after_stash=False,  # type: bool
++    after_venv_publish=False,  # type: bool
++):
++    lock = tmpdir.join("next-lock.json")
++    venv = tmpdir.join("next-venv")
++    if venv_existed:
++        _write(lock, "old")
++        os.mkdir(venv)
++        _write(os.path.join(venv, "marker"), "old-venv")
++
++    dead = SyncPublication(lock, venv)
++    dead.acquire()
++    dead.staging(venv_existed=venv_existed)
++    _stage_lock(dead, "new")
++    _stage_venv(dead, "new-venv")
++    if after_stash:
++        assert venv_existed
++        os.rename(venv, dead._venv_stash)
++    if after_venv_publish:
++        if venv_existed:
++            os.rename(venv, dead._venv_stash)
++        os.rename(dead.venv_candidate_dir, venv)
++    dead._phase = PHASE_COMMITTING
++    dead._write_pending()
++    pending = dead._pending_path
++    dead.release()
++    del dead
++
++    next_owner = SyncPublication(lock, venv)
++    next_owner.acquire()
++    try:
++        assert "new" == _read(lock)
++        assert "new-venv" == _read(os.path.join(venv, "marker"))
++        assert not os.path.exists(pending)
++        _assert_clean_siblings(venv)
++        assert os.path.isdir(venv)
++    finally:
++        next_owner.release()
++
++
++def test_recover_after_stash(tmpdir):
++    # type: (Any) -> None
++    _crash_in_committing(tmpdir, venv_existed=True, after_stash=True)
++
++
++def test_recover_mid_switch(tmpdir):
++    # type: (Any) -> None
++    _crash_in_committing(tmpdir, venv_existed=True, after_venv_publish=True)
++
++
++def test_recover_pre_stash(tmpdir):
++    # type: (Any) -> None
++    _crash_in_committing(tmpdir, venv_existed=True)
++
++
++def test_recover_first_create(tmpdir):
++    # type: (Any) -> None
++    _crash_in_committing(tmpdir, venv_existed=False, after_venv_publish=True)
++
++
++def test_single_owner_lock(tmpdir):
++    # type: (Any) -> None
++
++    lock = tmpdir.join("contended-lock.json")
++    events = tmpdir.join("events.log")
++    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++    env = dict(os.environ)
++    env["PEX_TEST_ROOT"] = repo_root
++
++    worker = (
++        "import os, sys, time\n"
++        "sys.path.insert(0, os.environ['PEX_TEST_ROOT'])\n"
++        "from pex.atomic_sync import SyncPublication\n"
++        "lock, events, hold = sys.argv[1], sys.argv[2], float(sys.argv[3])\n"
++        "pub = SyncPublication(lock)\n"
++        "open(events, 'a').write('waiting ' + str(os.getpid()) + '\\n')\n"
++        "pub.acquire()\n"
++        "open(events, 'a').write('acquired ' + str(os.getpid()) + ' ' + str(time.time()) + '\\n')\n"
++        "time.sleep(hold)\n"
++        "pub.staging()\n"
++        "with open(pub.lock_candidate_path, 'w') as fp:\n"
++        "    fp.write(str(os.getpid()))\n"
++        "pub.prepared()\n"
++        "pub.commit()\n"
++        "pub.release()\n"
++        "open(events, 'a').write('released ' + str(os.getpid()) + ' ' + str(time.time()) + '\\n')\n"
++    )
++
++    first = subprocess.Popen([sys.executable, "-c", worker, lock, events, "2"], env=env)
++    time.sleep(0.5)
++    second = subprocess.Popen([sys.executable, "-c", worker, lock, events, "0"], env=env)
++    assert 0 == first.wait(30)
++    assert 0 == second.wait(30)
++
++    events_by_name = {}  # type: dict
++    for line in _read(events).splitlines():
++        kind, rest = line.split(" ", 1)
++        events_by_name.setdefault(kind, []).append(rest)
++
++    assert 2 == len(events_by_name["acquired"])
++    assert 2 == len(events_by_name["released"])
++
++    def timestamp(entry):
++        # type: (str) -> float
++        return float(entry.rsplit(" ", 1)[1])
++
++    first_pid = events_by_name["acquired"][0].split(" ")[0]
++    first_release = timestamp(
++        next(entry for entry in events_by_name["released"] if entry.startswith(first_pid))
++    )
++    second_acquire = timestamp(events_by_name["acquired"][1])
++    assert second_acquire >= first_release - 0.05
++
++    # The contender that waited publishes (it recomputed after the owner ended); either way only
++    # one lock exists and it is valid.
++    assert os.path.exists(lock)
++    assert _read(lock) in (first_pid, events_by_name["acquired"][1].split(" ")[0])

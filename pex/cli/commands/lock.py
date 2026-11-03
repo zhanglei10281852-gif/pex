@@ -7,6 +7,7 @@ import functools
 import itertools
 import os.path
 import re
+import shutil
 import sys
 from argparse import Action, ArgumentError, ArgumentParser, ArgumentTypeError, _ActionsContainer
 from collections import OrderedDict, deque
@@ -16,6 +17,7 @@ from operator import attrgetter
 from pex import dependency_configuration, pex_warnings
 from pex.argparse import HandleBoolAction
 from pex.artifact_url import Fingerprint
+from pex.atomic_sync import SyncPublication
 from pex.build_system import pep_517
 from pex.cli.command import BuildTimeCommand
 from pex.commands.command import JsonMixin, OutputMixin
@@ -92,6 +94,7 @@ if TYPE_CHECKING:
         IO,
         Deque,
         Dict,
+        FrozenSet,
         Iterable,
         Iterator,
         List,
@@ -261,46 +264,152 @@ class SyncTarget(object):
     venv = attr.ib()  # type: Virtualenv
     command = attr.ib(default=None)  # type: Optional[Tuple[str, ...]]
 
-    def sync(
-        self,
-        distributions,  # type: Iterable[Distribution]
-        confirm=True,  # type: bool
-        retain_pip=False,  # type: bool
-    ):
-        # type: (...) -> Result
+    def run_command(self):
+        # type: () -> Result
+        if self.command:
+            try:
+                safe_execv(self.command)
+            except OSError as e:
+                return Error("Failed to execute {exe}: {err}".format(exe=self.command[0], err=e))
+        return Ok()
 
-        abs_venv_dir = os.path.realpath(self.venv.venv_dir)
 
-        existing_distributions_by_project_name = {
-            dist.metadata.project_name: dist for dist in self.venv.iter_distributions()
-        }  # type: Dict[ProjectName, Distribution]
-        installed_pip = existing_distributions_by_project_name.get(
-            self._PIP_PROJECT_NAME
-        )  # type: Optional[Distribution]
+@attr.s(frozen=True)
+class VenvSyncPlan(object):
+    """The changes needed to bring a venv in line with the resolved lock distributions.
 
-        resolved_pip = None  # type: Optional[Distribution]
-        to_remove = []  # type: List[Distribution]
-        to_install = []  # type: List[Distribution]
-        for distribution in distributions:
-            if self._PIP_PROJECT_NAME == distribution.metadata.project_name:
-                resolved_pip = distribution
-            existing_distribution = existing_distributions_by_project_name.pop(
-                distribution.metadata.project_name, None
+    The plan is described purely in terms of pins (not live files) so it can be computed against
+    the current venv (including prompting the user) and then applied to a staged candidate clone
+    of that venv without touching the live one until it is committed.
+    """
+
+    # Pip's bootstrapping (ensurepip) drags Pip itself plus, on Pythons older than 3.12,
+    # Setuptools and Wheel. These are managed outside the lock when Pip is retained and so are
+    # the only distributions allowed to appear in addition to the locked pins.
+    RETAINED_PIP_COMPANIONS = frozenset(
+        ProjectName(name) for name in ("pip", "setuptools", "wheel")
+    )
+
+    to_install = attr.ib()  # type: Tuple[Distribution, ...]
+    remove_pins = attr.ib()  # type: FrozenSet[Tuple[ProjectName, Version]]
+    expected_pins = attr.ib()  # type: FrozenSet[Tuple[ProjectName, Version]]
+    retain_pip = attr.ib(default=False)  # type: bool
+    ensure_pip = attr.ib(default=False)  # type: bool
+
+    @property
+    def is_noop(self):
+        # type: () -> bool
+        return not self.to_install and not self.remove_pins and not self.ensure_pip
+
+
+def _plan_venv_sync(
+    venv,  # type: Virtualenv
+    distributions,  # type: Iterable[Distribution]
+    confirm=True,  # type: bool
+    retain_pip=False,  # type: bool
+):
+    # type: (...) -> Union[VenvSyncPlan, Error]
+
+    existing_distributions_by_project_name = {
+        dist.metadata.project_name: dist for dist in venv.iter_distributions()
+    }  # type: Dict[ProjectName, Distribution]
+    installed_pip = existing_distributions_by_project_name.get(
+        SyncTarget._PIP_PROJECT_NAME
+    )  # type: Optional[Distribution]
+
+    resolved_pip = None  # type: Optional[Distribution]
+    to_remove_pins = set()  # type: Set[Tuple[ProjectName, Version]]
+    to_install = []  # type: List[Distribution]
+    for distribution in distributions:
+        if SyncTarget._PIP_PROJECT_NAME == distribution.metadata.project_name:
+            resolved_pip = distribution
+        existing_distribution = existing_distributions_by_project_name.pop(
+            distribution.metadata.project_name, None
+        )
+        if not existing_distribution:
+            to_install.append(distribution)
+        elif existing_distribution.metadata.version != distribution.metadata.version:
+            to_remove_pins.add(
+                (
+                    existing_distribution.metadata.project_name,
+                    existing_distribution.metadata.version,
+                )
             )
-            if not existing_distribution:
-                to_install.append(distribution)
-            elif existing_distribution.metadata.version != distribution.metadata.version:
-                to_remove.append(existing_distribution)
-                to_install.append(distribution)
-        if retain_pip:
-            existing_distributions_by_project_name.pop(self._PIP_PROJECT_NAME, None)
-        to_remove.extend(existing_distributions_by_project_name.values())
+            to_install.append(distribution)
+    if retain_pip:
+        existing_distributions_by_project_name.pop(SyncTarget._PIP_PROJECT_NAME, None)
+    for extra_distribution in existing_distributions_by_project_name.values():
+        to_remove_pins.add(
+            (extra_distribution.metadata.project_name, extra_distribution.metadata.version)
+        )
 
-        to_unlink_by_pin = (
-            OrderedDict()
-        )  # type: OrderedDict[Tuple[ProjectName, Version], List[Text]]
-        for distribution in to_remove:
-            to_unlink = []  # type: List[Text]
+    to_unlink_by_pin = OrderedDict()  # type: OrderedDict[Tuple[ProjectName, Version], List[Text]]
+    for distribution in venv.iter_distributions():
+        pin = (distribution.metadata.project_name, distribution.metadata.version)
+        if pin not in to_remove_pins:
+            continue
+        to_unlink = []  # type: List[Text]
+        if distribution.metadata.type is MetadataType.DIST_INFO:
+            to_unlink.extend(
+                os.path.realpath(os.path.join(distribution.location, installed_file.path))
+                for installed_file in Record.read(lines=distribution.iter_metadata_lines("RECORD"))
+                if isinstance(installed_file, InstalledFile)
+            )
+        elif distribution.metadata.type is MetadataType.EGG_INFO:
+            installed_files = distribution.metadata.files.metadata_file_rel_path(
+                "installed-files.txt"
+            )
+            if installed_files:
+                base_dir = os.path.realpath(
+                    os.path.join(distribution.location, os.path.dirname(installed_files))
+                )
+                to_unlink.extend(
+                    os.path.join(base_dir, path)
+                    for path in distribution.iter_metadata_lines("installed-files.txt")
+                )
+                # Pip generates "installed-files.txt" upon installing and this file does not
+                # include itself; so we tack that on here ourselves.
+                to_unlink.append(
+                    os.path.realpath(os.path.join(distribution.location, installed_files))
+                )
+        if to_unlink:
+            abs_venv_dir = os.path.realpath(venv.venv_dir)
+            to_unlink_by_pin[pin] = [
+                file for file in to_unlink if abs_venv_dir == safe_commonpath((abs_venv_dir, file))
+            ]
+    if confirm and to_unlink_by_pin:
+        for (project_name, version), files in to_unlink_by_pin.items():
+            print(project_name, version, ":", file=sys.stderr)
+            for f in files:
+                print("    ", f, file=sys.stderr)
+        if input(
+            "Remove the outdated distributions listed above from the venv at "
+            "{venv}? [yN]: ".format(venv=venv.venv_dir)
+        ).strip().lower() not in ("y", "yes"):
+            return Error("Sync cancelled.")
+
+    return VenvSyncPlan(
+        to_install=tuple(to_install),
+        remove_pins=frozenset(to_remove_pins),
+        expected_pins=frozenset(
+            (distribution.metadata.project_name, distribution.metadata.version)
+            for distribution in distributions
+        ),
+        retain_pip=retain_pip,
+        ensure_pip=bool(retain_pip and not resolved_pip and not installed_pip),
+    )
+
+
+def _apply_venv_sync(
+    venv,  # type: Virtualenv
+    plan,  # type: VenvSyncPlan
+):
+    # type: (...) -> None
+
+    abs_venv_dir = os.path.realpath(venv.venv_dir)
+    to_unlink = []  # type: List[Text]
+    for distribution in venv.iter_distributions(rescan=True):
+        if (distribution.metadata.project_name, distribution.metadata.version) in plan.remove_pins:
             if distribution.metadata.type is MetadataType.DIST_INFO:
                 to_unlink.extend(
                     os.path.realpath(os.path.join(distribution.location, installed_file.path))
@@ -321,60 +430,73 @@ class SyncTarget(object):
                         os.path.join(base_dir, path)
                         for path in distribution.iter_metadata_lines("installed-files.txt")
                     )
-                    # Pip generates "installed-files.txt" upon installing and this file does not
-                    # include itself; so we tack that on here ourselves.
                     to_unlink.append(
                         os.path.realpath(os.path.join(distribution.location, installed_files))
                     )
-            if to_unlink:
-                to_unlink_by_pin[
-                    (distribution.metadata.project_name, distribution.metadata.version)
-                ] = [
-                    file
-                    for file in to_unlink
-                    if abs_venv_dir == safe_commonpath((abs_venv_dir, file))
-                ]
-        if confirm and to_unlink_by_pin:
-            for (project_name, version), files in to_unlink_by_pin.items():
-                print(project_name, version, ":", file=sys.stderr)
-                for f in files:
-                    print("    ", f, file=sys.stderr)
-            if input(
-                "Remove the outdated distributions listed above from the venv at "
-                "{venv}? [yN]: ".format(venv=self.venv.venv_dir)
-            ).strip().lower() not in ("y", "yes"):
-                return Error("Sync cancelled.")
+    if to_unlink:
+        parent_dirs = set()  # type: Set[Text]
+        for file in to_unlink:
+            safe_delete(file)
+            parent_dirs.add(os.path.dirname(file))
+        for parent_dir in sorted(parent_dirs, reverse=True):
+            if not os.path.exists(parent_dir) or os.listdir(parent_dir):
+                continue
+            if abs_venv_dir == safe_commonpath((abs_venv_dir, parent_dir)):
+                os.rmdir(parent_dir)
 
-        if to_unlink_by_pin:
-            parent_dirs = set()  # type: Set[Text]
-            for file in itertools.chain.from_iterable(to_unlink_by_pin.values()):
-                safe_delete(file)
-                parent_dirs.add(os.path.dirname(file))
-            for parent_dir in sorted(parent_dirs, reverse=True):
-                if not os.listdir(parent_dir) and abs_venv_dir == safe_commonpath(
-                    (abs_venv_dir, parent_dir)
-                ):
-                    os.rmdir(parent_dir)
+    if plan.ensure_pip:
+        venv.ensure_pip(upgrade=True)
 
-        if retain_pip and not resolved_pip and not installed_pip:
-            self.venv.ensure_pip(upgrade=True)
+    if plan.to_install:
+        for distribution in plan.to_install:
+            for src, dst in reinstall_venv(
+                installed_wheel=InstalledWheel.load(distribution.location), venv=venv
+            ):
+                TRACER.log("Installed {src} -> {dst}".format(src=src, dst=dst))
 
-        if to_install:
-            for distribution in to_install:
-                for src, dst in reinstall_venv(
-                    installed_wheel=InstalledWheel.load(distribution.location), venv=self.venv
-                ):
-                    TRACER.log("Installed {src} -> {dst}".format(src=src, dst=dst))
-            for script in self.venv.rewrite_scripts():
-                TRACER.log("Re-wrote script shebang for {script}".format(script=script))
 
-        if self.command:
-            try:
-                safe_execv(self.command)
-            except OSError as e:
-                return Error("Failed to execute {exe}: {err}".format(exe=self.command[0], err=e))
+def _verify_venv_sync(
+    venv,  # type: Virtualenv
+    plan,  # type: VenvSyncPlan
+):
+    # type: (...) -> Result
 
-        return Ok()
+    expected = set(plan.expected_pins)  # type: Set[Tuple[ProjectName, Version]]
+    actual = {
+        (distribution.metadata.project_name, distribution.metadata.version)
+        for distribution in venv.iter_distributions(rescan=True)
+    }  # type: Set[Tuple[ProjectName, Version]]
+
+    def mismatch_error(detail):
+        # type: (str) -> Error
+        return Error(
+            "The synced venv at {venv} does not match the lock. {detail}".format(
+                venv=venv.venv_dir, detail=detail
+            )
+        )
+
+    if plan.retain_pip:
+        # A retained Pip (and its ensurepip companions: Setuptools / Wheel on old Pythons) is
+        # managed outside the lock; allow exactly those extra pins.
+        extras = actual - expected
+        if not expected.issubset(actual) or any(
+            project_name not in VenvSyncPlan.RETAINED_PIP_COMPANIONS
+            for project_name, _ in extras
+        ):
+            return mismatch_error(
+                "Missing: {missing}; extra: {extra}".format(
+                    missing=sorted(str(p) for p in expected - actual),
+                    extra=sorted(str(p) for p in extras),
+                )
+            )
+    elif actual != expected:
+        return mismatch_error(
+            "Missing: {missing}; extra: {extra}".format(
+                missing=sorted(str(p) for p in expected - actual),
+                extra=sorted(str(p) for p in actual - expected),
+            )
+        )
+    return Ok()
 
 
 @attr.s(frozen=True)
@@ -1899,8 +2021,12 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
         lock_update,  # type: LockUpdate
         lock_file,  # type: Lockfile
         lock_file_path,  # type: str
+        lock_output_path=None,  # type: Optional[str]
     ):
         # type: (...) -> Result
+        # When `lock_output_path` is None the lock is rewritten in place at `lock_file_path`;
+        # sync passes a staged candidate path that is only switched into `lock_file_path` once the
+        # matching venv is also ready.
 
         original_requirements_by_project_name = (
             OrderedDict()
@@ -2183,7 +2309,7 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
         if dry_run:
             return Error() if dry_run is DryRunStyle.CHECK else Ok()
 
-        with open(lock_file_path, "w") as fp:
+        with open(lock_output_path or lock_file_path, "w") as fp:
             self._dump_lockfile(
                 lock_file=attr.evolve(
                     lock_file,
@@ -2264,15 +2390,91 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
 
         return self._process_lock_update(lock_update, lock_file, lock_file_path)
 
-    def _sync(self):
-        # type: () -> Result
+    def _select_venv_creation_interpreter(self, pip_configuration):
+        # type: (PipConfiguration) -> Union[PythonInterpreter, Error]
+        if self.options.venv_python:
+            if os.path.isfile(self.options.venv_python):
+                return PythonInterpreter.from_binary(self.options.venv_python)
+            interpreter = PythonInterpreter.from_env(self.options.venv_python)
+            if interpreter is None:
+                return Error(
+                    "Could not find an interpreter matching {venv_python} to create the venv "
+                    "{venv}.".format(venv_python=self.options.venv_python, venv=self.options.venv)
+                )
+            return interpreter
 
-        resolver_configuration = resolver_options.configure(self.options, use_system_time=False)
-        production_assert(isinstance(resolver_configuration, LockRepositoryConfiguration))
-        pip_configuration = resolver_configuration.pip_configuration
-        locking_configuration = try_(self._locking_configuration(pip_configuration))
-        dependency_config = dependency_configuration.configure(self.options)
-        lock_file_path = self.options.lock
+        targets = target_options.configure(
+            self.options, pip_configuration=pip_configuration
+        ).resolve_targets()
+        if isinstance(targets, Error):
+            return targets
+        interpreters = [
+            target.get_interpreter()
+            for target in targets.unique_targets()
+            if isinstance(target, LocalInterpreter)
+        ]
+        interpreter = interpreters[0] if len(interpreters) == 1 else None
+        if interpreter is None:
+            return Error(
+                "In order to create the venv {venv} the sync operation needs to know "
+                "which interpreter to use to create it.\n"
+                "Use `--venv-interpreter` to select an interpreter for venv creation.".format(
+                    venv=self.options.venv
+                )
+            )
+        return interpreter
+
+    def _resolve_venv_distributions(
+        self,
+        lock_file,  # type: Lockfile
+        interpreter,  # type: PythonInterpreter
+        pip_configuration,  # type: PipConfiguration
+        requirement_configuration,  # type: RequirementConfiguration
+        dependency_config,  # type: DependencyConfiguration
+    ):
+        # type: (...) -> Union[List[Distribution], Error]
+        target = LocalInterpreter.create(interpreter)
+        resolve_result = resolve_from_pex_lock(
+            targets=Targets.from_target(target),
+            lock=lock_file,
+            resolver=ConfiguredResolver(pip_configuration),
+            requirements=requirement_configuration.requirements,
+            requirement_files=requirement_configuration.requirement_files,
+            constraint_files=requirement_configuration.constraint_files,
+            repos_configuration=pip_configuration.repos_configuration,
+            resolver_version=pip_configuration.resolver_version,
+            network_configuration=pip_configuration.network_configuration,
+            build_configuration=pip_configuration.build_configuration,
+            transitive=pip_configuration.transitive,
+            max_parallel_jobs=pip_configuration.max_jobs,
+            pip_version=pip_configuration.version,
+            use_pip_config=pip_configuration.use_pip_config,
+            extra_pip_requirements=pip_configuration.extra_requirements,
+            keyring_provider=pip_configuration.keyring_provider,
+            result_type=InstallableType.INSTALLED_WHEEL_CHROOT,
+            dependency_configuration=dependency_config,
+        )
+        if isinstance(resolve_result, Error):
+            return resolve_result
+        return [
+            resolved_distribution.distribution
+            for resolved_distribution in resolve_result.distributions
+            if resolved_distribution.target == target
+        ]
+
+    def _sync_dry_run(
+        self,
+        lock_file_path,  # type: str
+        pip_configuration,  # type: PipConfiguration
+        locking_configuration,  # type: LockingConfiguration
+        dependency_config,  # type: DependencyConfiguration
+        venv_dir,  # type: Optional[str]
+        existing_venv,  # type: Optional[Virtualenv]
+        create_interpreter,  # type: Optional[PythonInterpreter]
+        command_args,  # type: Optional[Tuple[str, ...]]
+    ):
+        # type: (...) -> Result
+
         if os.path.exists(lock_file_path):
             lock_configuration = locking_configuration.lock_configuration
             build_configuration = pip_configuration.build_configuration
@@ -2320,7 +2522,9 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
             if isinstance(lock_update, Result):
                 return lock_update
 
-            try_(self._process_lock_update(lock_update, lock_file, lock_file_path))
+            update_result = self._process_lock_update(lock_update, lock_file, lock_file_path)
+            if isinstance(update_result, Error):
+                return update_result
         else:
             targets = try_(
                 self._resolve_targets(
@@ -2350,114 +2554,338 @@ class Lock(OutputMixin, JsonMixin, BuildTimeCommand):
                     avoid_downloads=self.options.avoid_downloads,
                 )
             )
-            if self.options.dry_run:
-                output = sys.stdout if self.options.dry_run is DryRunStyle.DISPLAY else sys.stderr
-                for locked_resolve in lockfile.locked_resolves:
+            output = sys.stdout if self.options.dry_run is DryRunStyle.DISPLAY else sys.stderr
+            for locked_resolve in lockfile.locked_resolves:
+                print(
+                    "Would lock {count} {project} for platform {platform}:".format(
+                        count=len(locked_resolve.locked_requirements),
+                        project=pluralize(locked_resolve.locked_requirements, "project"),
+                        platform=locked_resolve.target_platform,
+                    ),
+                    file=output,
+                )
+                for locked_requirement in locked_resolve.locked_requirements:
                     print(
-                        "Would lock {count} {project} for platform {platform}:".format(
-                            count=len(locked_resolve.locked_requirements),
-                            project=pluralize(locked_resolve.locked_requirements, "project"),
-                            platform=locked_resolve.target_platform,
+                        "  {project_name} {version}".format(
+                            project_name=locked_requirement.pin.project_name,
+                            version=locked_requirement.pin.version,
                         ),
                         file=output,
                     )
-                    for locked_requirement in locked_resolve.locked_requirements:
-                        print(
-                            "  {project_name} {version}".format(
-                                project_name=locked_requirement.pin.project_name,
-                                version=locked_requirement.pin.version,
-                            ),
-                            file=output,
-                        )
-            else:
-                with safe_open(lock_file_path, "w") as fp:
-                    self._dump_lockfile(lockfile, output=fp)
 
         sync_target = None  # type: Optional[SyncTarget]
-        if self.options.venv:
-            if os.path.exists(self.options.venv):
-                try:
-                    venv = Virtualenv(self.options.venv)
-                except InvalidVirtualenvError as e:
-                    return Error("The given --venv is not a valid venv: {err}".format(err=e))
-            else:
-                if self.options.venv_python:
-                    interpreter = (
-                        PythonInterpreter.from_binary(self.options.venv_python)
-                        if os.path.isfile(self.options.venv_python)
-                        else PythonInterpreter.from_env(self.options.venv_python)
-                    )
-                else:
-                    targets = target_options.configure(
-                        self.options, pip_configuration=pip_configuration
-                    ).resolve_targets()
-                    interpreters = [
-                        target.get_interpreter()
-                        for target in targets.unique_targets()
-                        if isinstance(target, LocalInterpreter)
-                    ]
-                    if len(interpreters) != 1:
-                        return Error(
-                            "In order to create the venv {venv} the sync operation needs to know "
-                            "which interpreter to use to create it.\n"
-                            "Use `--venv-interpreter` to select an interpreter for venv creation."
-                        )
-                    interpreter = interpreters[0]
-                venv = Virtualenv.create(self.options.venv, interpreter=interpreter)
-            sync_target = SyncTarget.resolve_command(venv=venv, command=self.passthrough_args)
-        elif self.passthrough_args:
+        if venv_dir is not None:
+            venv = existing_venv or Virtualenv.create(venv_dir, interpreter=create_interpreter)
+            sync_target = SyncTarget.resolve_command(venv=venv, command=command_args)
+        elif command_args is not None:
+            assert self.passthrough_args
             sync_target = try_(
                 SyncTarget.resolve_venv(self.passthrough_args[0], *self.passthrough_args[1:])
             )
         if not sync_target:
             return Ok()
 
-        if self.options.dry_run:
-            would_update_venv_msg = "Would sync venv at {venv}".format(
-                venv=sync_target.venv.venv_dir
-            )
-            if sync_target.command:
-                return Ok(
-                    "\n".join(
-                        (
-                            would_update_venv_msg + " and run the following command in it:",
-                            "  " + " ".join(shlex_quote(arg) for arg in sync_target.command),
-                        )
+        would_update_venv_msg = "Would sync venv at {venv}".format(venv=sync_target.venv.venv_dir)
+        if sync_target.command:
+            return Ok(
+                "\n".join(
+                    (
+                        would_update_venv_msg + " and run the following command in it:",
+                        "  " + " ".join(shlex_quote(arg) for arg in sync_target.command),
                     )
                 )
-            else:
-                return Ok(would_update_venv_msg + ".")
-
-        lock_file = try_(parse_lockfile(self.options, lock_file_path=lock_file_path))
-        target = LocalInterpreter.create(sync_target.venv.interpreter)
-        resolve_result = try_(
-            resolve_from_pex_lock(
-                targets=Targets.from_target(target),
-                lock=lock_file,
-                resolver=ConfiguredResolver(pip_configuration),
-                requirements=requirement_configuration.requirements,
-                requirement_files=requirement_configuration.requirement_files,
-                constraint_files=requirement_configuration.constraint_files,
-                repos_configuration=pip_configuration.repos_configuration,
-                resolver_version=pip_configuration.resolver_version,
-                network_configuration=pip_configuration.network_configuration,
-                build_configuration=pip_configuration.build_configuration,
-                transitive=pip_configuration.transitive,
-                max_parallel_jobs=pip_configuration.max_jobs,
-                pip_version=pip_configuration.version,
-                use_pip_config=pip_configuration.use_pip_config,
-                extra_pip_requirements=pip_configuration.extra_requirements,
-                keyring_provider=pip_configuration.keyring_provider,
-                result_type=InstallableType.INSTALLED_WHEEL_CHROOT,
-                dependency_configuration=dependency_config,
             )
-        )
-        return sync_target.sync(
-            distributions=[
-                resolved_distribution.distribution
-                for resolved_distribution in resolve_result.distributions
-                if resolved_distribution.target == target
-            ],
-            confirm=not self.options.yes,
-            retain_pip=self.options.pip,
-        )
+        return Ok(would_update_venv_msg + ".")
+
+    def _sync(self):
+        # type: () -> Result
+
+        resolver_configuration = resolver_options.configure(self.options, use_system_time=False)
+        production_assert(isinstance(resolver_configuration, LockRepositoryConfiguration))
+        pip_configuration = resolver_configuration.pip_configuration
+        locking_configuration = try_(self._locking_configuration(pip_configuration))
+        dependency_config = dependency_configuration.configure(self.options)
+        lock_file_path = os.path.abspath(self.options.lock)
+
+        # Preflight the venv this lock will be paired with. None of this creates anything: an
+        # explicit --venv is validated if present or its creation interpreter is selected, and a
+        # passthrough command resolves to an enclosing venv that must already exist.
+        venv_dir = None  # type: Optional[str]
+        preflight_venv = None  # type: Optional[Virtualenv]
+        create_interpreter = None  # type: Optional[PythonInterpreter]
+        command_args = None  # type: Optional[Tuple[str, ...]]
+        if self.options.venv:
+            venv_dir = os.path.realpath(self.options.venv)
+            if os.path.exists(venv_dir):
+                try:
+                    preflight_venv = Virtualenv(venv_dir)
+                except InvalidVirtualenvError as e:
+                    return Error("The given --venv is not a valid venv: {err}".format(err=e))
+            else:
+                create_interpreter = try_(self._select_venv_creation_interpreter(pip_configuration))
+            if self.passthrough_args:
+                command_args = tuple(self.passthrough_args)
+        elif self.passthrough_args:
+            passthrough_target = try_(
+                SyncTarget.resolve_venv(self.passthrough_args[0], *self.passthrough_args[1:])
+            )
+            preflight_venv = passthrough_target.venv
+            venv_dir = os.path.realpath(preflight_venv.venv_dir)
+            command_args = passthrough_target.command
+
+        if self.options.dry_run:
+            return self._sync_dry_run(
+                lock_file_path=lock_file_path,
+                pip_configuration=pip_configuration,
+                locking_configuration=locking_configuration,
+                dependency_config=dependency_config,
+                venv_dir=venv_dir,
+                existing_venv=preflight_venv,
+                create_interpreter=create_interpreter,
+                command_args=command_args,
+            )
+
+        # All concurrent syncs for this lock path (and thus its paired venv) share one
+        # publication owner. Contenders block here and recover any dead generation before
+        # recomputing against the committed files.
+        publication = SyncPublication(lock_path=lock_file_path, venv_dir=venv_dir)
+        publication.acquire()
+        published = False
+        try:
+            try:
+                # Re-check under the lock: a competing owner that just finished may already have
+                # created either resource.
+                venv_existed = venv_dir is not None and os.path.isdir(venv_dir)
+                publication.staging(venv_existed=venv_existed)
+
+                requirement_configuration = None  # type: Optional[RequirementConfiguration]
+                if os.path.exists(lock_file_path):
+                    build_configuration = pip_configuration.build_configuration
+                    original_lock_file = try_(
+                        parse_lockfile(self.options, lock_file_path=lock_file_path)
+                    )
+                    lock_file = attr.evolve(
+                        original_lock_file,
+                        configuration=locking_configuration.lock_configuration,
+                        pip_version=pip_configuration.version,
+                        resolver_version=pip_configuration.resolver_version,
+                        allow_prereleases=pip_configuration.allow_prereleases,
+                        allow_wheels=build_configuration.allow_wheels,
+                        only_wheels=SortedTuple(build_configuration.only_wheels),
+                        allow_builds=build_configuration.allow_builds,
+                        only_builds=SortedTuple(build_configuration.only_builds),
+                        prefer_older_binary=build_configuration.prefer_older_binary,
+                        use_pep517=build_configuration.use_pep517,
+                        build_isolation=build_configuration.build_isolation,
+                        transitive=pip_configuration.transitive,
+                        excluded=SortedTuple(dependency_config.excluded),
+                        overridden=SortedTuple(dependency_config.all_overrides()),
+                    )
+                    lock_update_request = try_(
+                        self._create_lock_update_request(
+                            lock_file_path=lock_file_path,
+                            lock_file=lock_file,
+                            dependency_config=dependency_config,
+                        )
+                    )
+                    try_(locking_configuration.check_scripts(lock_update_request.targets))
+                    pip_configuration = try_(
+                        finalize_resolve_config(
+                            resolver_configuration=pip_configuration,
+                            targets=lock_update_request.targets,
+                            context="lock syncing",
+                        )
+                    )
+                    requirement_configuration = self._merge_project_requirements(
+                        locking_configuration.requirement_configuration,
+                        pip_configuration,
+                        lock_update_request.targets,
+                    )
+                    lock_update = lock_update_request.sync(
+                        requirement_configuration=requirement_configuration,
+                    )
+                    if isinstance(lock_update, Result):
+                        publication.abort()
+                        return lock_update
+
+                    update_result = self._process_lock_update(
+                        lock_update,
+                        lock_file,
+                        lock_file_path,
+                        lock_output_path=publication.lock_candidate_path,
+                    )
+                    if isinstance(update_result, Error):
+                        publication.abort()
+                        return update_result
+                else:
+                    targets = try_(
+                        self._resolve_targets(
+                            action="creating",
+                            style=self.options.style,
+                            target_configuration=locking_configuration.target_configuration,
+                        )
+                    )
+                    try_(locking_configuration.check_scripts(targets))
+                    pip_configuration = try_(
+                        finalize_resolve_config(
+                            resolver_configuration=pip_configuration,
+                            targets=targets,
+                            context="lock creation",
+                        )
+                    )
+                    requirement_configuration = self._merge_project_requirements(
+                        locking_configuration.requirement_configuration, pip_configuration, targets
+                    )
+                    lockfile = try_(
+                        create(
+                            lock_configuration=locking_configuration.lock_configuration,
+                            requirement_configuration=requirement_configuration,
+                            targets=targets,
+                            pip_configuration=pip_configuration,
+                            dependency_configuration=dependency_config,
+                            avoid_downloads=self.options.avoid_downloads,
+                        )
+                    )
+                    with safe_open(publication.lock_candidate_path, "w") as fp:
+                        self._dump_lockfile(lockfile, output=fp)
+
+                lock_changed = os.path.exists(publication.lock_candidate_path)
+                production_assert(
+                    requirement_configuration is not None,
+                    "The requirement configuration must be finalized before syncing a venv.",
+                )
+
+                if venv_dir is None:
+                    # Lock-only sync. Nothing to pair: publish the staged lock if it changed and
+                    # otherwise leave everything untouched.
+                    if lock_changed:
+                        publication.prepared()
+                        publication.commit()
+                        published = True
+                    else:
+                        publication.abort()
+                    return Ok()
+
+                if venv_existed:
+                    live_venv = preflight_venv
+                    if live_venv is None or os.path.realpath(live_venv.venv_dir) != venv_dir:
+                        # The venv appeared (or changed hands) while we waited for the owner lock.
+                        live_venv = Virtualenv(venv_dir)
+
+                    # Resolve against the staged lock when it changed, else the committed one;
+                    # both describe the generation that is about to be published.
+                    distributions = try_(
+                        self._resolve_venv_distributions(
+                            lock_file=try_(
+                                parse_lockfile(
+                                    self.options,
+                                    lock_file_path=(
+                                        publication.lock_candidate_path
+                                        if lock_changed
+                                        else lock_file_path
+                                    ),
+                                )
+                            ),
+                            interpreter=live_venv.interpreter,
+                            pip_configuration=pip_configuration,
+                            requirement_configuration=requirement_configuration,
+                            dependency_config=dependency_config,
+                        )
+                    )
+                    # Plan against the live venv so the confirmation prompt names the paths the
+                    # user knows and a fully up-to-date venv costs no staging work.
+                    plan = _plan_venv_sync(
+                        live_venv,
+                        distributions,
+                        confirm=not self.options.yes,
+                        retain_pip=self.options.pip,
+                    )
+                    if isinstance(plan, Error):
+                        publication.abort()
+                        return plan
+
+                    if not lock_changed and plan.is_noop:
+                        # The committed generation already matches; no switch needed.
+                        publication.abort()
+                    else:
+                        if not lock_changed:
+                            # The lock content is unchanged but the venv must move; publish the
+                            # unchanged lock as part of the same generation so the pair is always
+                            # committed together.
+                            shutil.copyfile(lock_file_path, publication.lock_candidate_path)
+                        publication.clone_existing_venv(venv_dir)
+                        candidate_venv = Virtualenv(publication.venv_candidate_dir)
+                        _apply_venv_sync(candidate_venv, plan)
+                        candidate_venv.rewrite_for_target_dir(real_venv_dir=venv_dir)
+                        verify_result = _verify_venv_sync(candidate_venv, plan)
+                        if isinstance(verify_result, Error):
+                            publication.abort()
+                            return verify_result
+                        publication.prepared()
+                        publication.commit()
+                        published = True
+                else:
+                    # First creation: build the venv at the candidate path, laying it out for the
+                    # final path, and only rename it into place once complete and verified.
+                    candidate_venv = Virtualenv.create(
+                        publication.venv_candidate_dir, interpreter=create_interpreter
+                    )
+                    candidate_venv.rewrite_for_target_dir(real_venv_dir=venv_dir)
+                    distributions = try_(
+                        self._resolve_venv_distributions(
+                            lock_file=try_(
+                                parse_lockfile(
+                                    self.options,
+                                    lock_file_path=publication.lock_candidate_path,
+                                )
+                            ),
+                            interpreter=candidate_venv.interpreter,
+                            pip_configuration=pip_configuration,
+                            requirement_configuration=requirement_configuration,
+                            dependency_config=dependency_config,
+                        )
+                    )
+                    plan = _plan_venv_sync(
+                        candidate_venv,
+                        distributions,
+                        confirm=False,
+                        retain_pip=self.options.pip,
+                    )
+                    if isinstance(plan, Error):
+                        publication.abort()
+                        return plan
+                    if not lock_changed:
+                        # The lock existed before we acquired ownership but had no venv yet; pair
+                        # the existing lock content with the new venv generation.
+                        shutil.copyfile(lock_file_path, publication.lock_candidate_path)
+                    _apply_venv_sync(candidate_venv, plan)
+                    candidate_venv.rewrite_for_target_dir(real_venv_dir=venv_dir)
+                    verify_result = _verify_venv_sync(candidate_venv, plan)
+                    if isinstance(verify_result, Error):
+                        publication.abort()
+                        return verify_result
+                    publication.prepared()
+                    publication.commit()
+                    published = True
+            except BaseException:
+                if not published:
+                    publication.abort()
+                raise
+        finally:
+            publication.release()
+
+        # The matching generation is committed. Run the post-sync command, if any, against the
+        # published venv. The command runs after publication; its exit code is never a reason to
+        # roll the committed generation back.
+        if command_args is not None:
+            if self.options.venv:
+                final_target = SyncTarget.resolve_command(
+                    venv=Virtualenv(venv_dir), command=command_args
+                )
+            else:
+                assert self.passthrough_args
+                final_target = try_(
+                    SyncTarget.resolve_venv(self.passthrough_args[0], *self.passthrough_args[1:])
+                )
+            return final_target.run_command()
+        return Ok()

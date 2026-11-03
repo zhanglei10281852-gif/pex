@@ -1,0 +1,9 @@
+项目：pex-tool-pex-3be191fa-211c-4806-829a-2c682486f25c｜Session：6ae94311e498b5216ff888e3｜结论：部分完成
+Rubric ID：1｜状态：未通过｜期望行为：同步成功时 lock 与 venv 只对外呈现同一代解析结果。｜实际观察：提交按 venv 后 lock 的两个独立重命名执行；在 venv 已替换而 lock 尚未替换的受控交错中读取到 venv=new、lock=old。｜直接证据：visibility_repro.py 输出 P1_VISIBILITY {'lock': 'old', 'venv': 'new'}。｜原因：发布协议没有为两个公开路径提供统一可见切换点。｜影响：同步提交过程中其他进程能够读取新环境与旧锁的混合代次。｜证据位置：pex/atomic_sync.py:560-580；F:/swe/work/visibility_repro.py
+Rubric ID：2｜状态：通过｜期望行为：解析、安装或移除失败时保留原 lock 与 venv，首次失败不留下成功状态。｜实际观察：解析和候选环境修改均发生在候选路径，prepared 前的错误调用 abort 删除候选；12 个状态机单测覆盖失败保留与首次创建清理并全部通过。｜直接证据：python -m pytest tests/test_atomic_sync.py 得到 12 passed；pex/cli/commands/lock.py:2704-2868。
+Rubric ID：3｜状态：未通过｜期望行为：替换失败或进程中断后重试能清理或接管候选状态并收敛。｜实际观察：acquire 捕获恢复异常后只发出警告并继续返回所有权；注入恢复失败后 acquire_returned=True 且 pending_remains=1。｜直接证据：adversarial_repro.py 输出 P1_RECOVERY，保留 pending 文件并返回成功。｜原因：恢复失败未传回主流程，新的同步仍可在未恢复代次上继续执行。｜影响：重试不会保证先恢复旧提交状态，遗留候选和待提交记录持续存在。｜证据位置：pex/atomic_sync.py:314-324；F:/swe/work/adversarial_repro.py
+Rubric ID：4｜状态：未通过｜期望行为：同一路径的并发同步不能分别覆盖 lock 与 venv，竞争完成后只观察完整代次。｜实际观察：写入调用受 owner lock 串行化，但公开资源仍分两次重命名；受控交错在一个提交持锁期间观察到新 venv 与旧 lock。｜直接证据：P1_VISIBILITY 输出 lock=old、venv=new；单所有者测试仅证明竞争写者等待。｜原因：互斥锁约束写者，不约束未持锁的读取者观察两个公开路径。｜影响：并发消费者可在提交窗口使用不匹配的锁和环境。｜证据位置：pex/atomic_sync.py:302-324、560-580；tests/test_atomic_sync.py:309-367
+Rubric ID：5｜状态：通过｜期望行为：lock-only 与 dry-run 保持既有输出和非变更行为。｜实际观察：dry-run 在创建发布所有者前返回；lock-only 仅在候选 lock 存在时执行单文件原子替换，否则 abort。｜直接证据：pex/cli/commands/lock.py:2636-2647、2754-2767；test_lock_only_create_update 与 test_lock_only_noop 通过。
+Rubric ID：6｜状态：通过｜期望行为：同步成功后的后置命令在已提交环境执行，命令非零不回滚同步。｜实际观察：publication.release 后重新解析最终 venv 并执行命令，命令结果直接返回且没有回滚路径。｜直接证据：pex/cli/commands/lock.py:2875-2891。
+
+关键原始证据摘要：无缓存状态机测试 12 passed；恢复异常复现为 acquire 返回且 pending 保留；提交中间点复现为 lock=old、venv=new。
