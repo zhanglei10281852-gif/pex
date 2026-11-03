@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import OrderedDict
 from subprocess import CalledProcessError
@@ -709,8 +710,16 @@ def build(
     pex_file,  # type: str
     url_fetcher=None,  # type: Optional[URLFetcher]
     env=ENV,  # type: Variables
+    dest_dir=None,  # type: Optional[str]
 ):
     # type: (...) -> Iterator[ScieInfo]
+    """Build one scie per configured interpreter.
+
+    All outputs (scie executables and any requested hash sidecars) are written under
+    `dest_dir`. When `dest_dir` is not given the outputs are written next to `pex_file`, which is
+    the historical behavior. A caller staging a transactional generation can pass a private
+    candidate directory that no other process will read from or write to.
+    """
 
     science = ensure_science(
         url_fetcher=url_fetcher,
@@ -729,12 +738,18 @@ def build(
     elif len(configuration.interpreters) > 1:
         use_platform_suffix = True
 
+    output_base = (
+        os.path.abspath(dest_dir)
+        if dest_dir
+        else os.path.dirname(os.path.abspath(pex_file))
+    )
+
     errors = OrderedDict()  # type: OrderedDict[Manifest, str]
     for manifest in create_manifests(configuration, name, pex, use_platform_suffix):
         args = [science, "--cache-dir", _science_dir(env, "cache")]
         if env.PEX_VERBOSE:
             args.append("-{verbosity}".format(verbosity="v" * env.PEX_VERBOSE))
-        dest_dir = os.path.dirname(os.path.abspath(pex_file))
+        dest_dir = output_base
         if PlatformNamingStyle.PARENT_DIR is naming_style:
             dest_dir = os.path.join(dest_dir, manifest.interpreter.platform.value)
         args.extend(
@@ -806,15 +821,19 @@ def build(
             )
             _, stderr = process.communicate()
             if process.returncode != 0:
-                saved_manifest = os.path.relpath(
-                    os.path.join(dest_dir, os.path.basename(manifest.path))
+                # The build output directory may be a private staging candidate that is cleaned up
+                # on failure, so save the lift manifest under the system temp dir instead of next
+                # to the outputs so it remains available for inspection.
+                saved_manifest_dir = tempfile.mkdtemp(prefix="pex-scie-lift-manifest-")
+                saved_manifest = os.path.join(
+                    saved_manifest_dir, os.path.basename(manifest.path)
                 )
                 shutil.copy(manifest.path, saved_manifest)
                 errors[manifest] = (
-                    "Command `{command}` failed with exit code {exit_code} (saved lift manifest to "
-                    "{saved_manifest} for inspection):\n{stderr}"
+                    "Command `{command}` failed with exit code {exit_code} at the science build "
+                    "stage (saved lift manifest to {saved_manifest} for inspection):\n{stderr}"
                 ).format(
-                    command=" ".join(shlex_quote(arg) for arg in args[:-1] + [saved_manifest]),
+                    command=" ".join(shlex_quote(arg) for arg in args[:-1] + [manifest.path]),
                     exit_code=process.returncode,
                     saved_manifest=saved_manifest,
                     stderr=stderr.decode("utf-8").strip(),
@@ -839,11 +858,11 @@ def build(
 
     if errors:
         raise ScienceError(
-            "Failed to build {count} {scies}:\n\n{errors}".format(
+            "Failed to build {count} {scies} at the science build stage:\n\n{errors}".format(
                 count=len(errors),
                 scies=pluralize(errors, "scie"),
                 errors="\n\n".join(
-                    "{index}. For {python_description}: {err}".format(
+                    "{index}. For target {python_description}: {err}".format(
                         index=index,
                         python_description=manifest.interpreter.render_description(),
                         err=err,

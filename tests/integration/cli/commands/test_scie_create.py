@@ -4,11 +4,13 @@
 from __future__ import absolute_import
 
 import hashlib
+import os
 import os.path
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -17,15 +19,24 @@ from pex.common import safe_delete
 from pex.fetcher import URLFetcher
 from pex.interpreter import PythonInterpreter
 from pex.layout import Layout
+from pex.os import WINDOWS
 from pex.pep_440 import Version
+from pex.sysconfig import SysPlatform
 from pex.typing import TYPE_CHECKING
-from testing import PY310, PY311, ensure_python_interpreter, make_env, run_pex_command
+from testing import (
+    PY310,
+    PY311,
+    ensure_python_interpreter,
+    installed_pex_wheel_venv_python,
+    make_env,
+    run_pex_command,
+)
 from testing.cli import run_pex3
 from testing.pytest_utils.tmp import Tempdir
 from testing.scie import skip_if_no_provider
 
 if TYPE_CHECKING:
-    from typing import Any, Optional, Text, Tuple
+    from typing import Any, List, Optional, Text, Tuple
 
 
 def test_not_a_pex(tmpdir):
@@ -343,3 +354,399 @@ def test_pex_file_path_dest(
     assert not os.path.exists(tmpdir.join("cowsay"))
     assert not os.path.exists(os.path.join(dest2, "cowsay.pex"))
     assert b"| Goo! |" in subprocess.check_output(args=[os.path.join(dest2, "cowsay"), "Goo!"])
+
+
+# A deterministic, offline stand-in for the `science` binary. It parses just enough of the
+# `science ... lift build` command line to emit the named scie binary and any requested hash
+# sidecars, and it supports test knobs via environment variables: failing a target platform,
+# writing a bad checksum sidecar, tagging output with a marker and sleeping while building.
+_FAKE_SCIENCE_SCRIPT = r"""
+from __future__ import print_function
+
+import hashlib
+import os
+import sys
+import time
+
+
+def main(argv):
+    if len(argv) == 1 and argv[0] == "--version":
+        print("0.21.0")
+        return 0
+
+    dest_dir = None
+    manifest_path = None
+    hash_algorithms = []
+    use_platform_suffix = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--dest-dir":
+            dest_dir = argv[i + 1]
+            i += 2
+        elif arg == "--hash":
+            hash_algorithms.append(argv[i + 1])
+            i += 2
+        elif arg == "--cache-dir":
+            i += 2
+        elif arg == "--use-platform-suffix":
+            use_platform_suffix = True
+            i += 1
+        elif arg == "--no-use-platform-suffix":
+            use_platform_suffix = False
+            i += 1
+        elif arg.endswith(".toml"):
+            manifest_path = arg
+            i += 1
+        else:
+            i += 1
+
+    manifest_base = os.path.basename(manifest_path)[: -len(".toml")]
+    app_name, platform = manifest_base.split("-lift-", 1)
+    is_windows_target = platform.startswith("windows")
+
+    fail_platform = os.environ.get("PEX_TEST_FAIL_SCIE_PLATFORM")
+    if fail_platform and platform == fail_platform:
+        print(
+            "fake-science: injected failure for {platform}".format(platform=platform),
+            file=sys.stderr,
+        )
+        return 1
+
+    if os.environ.get("PEX_TEST_SCIE_SLEEP"):
+        time.sleep(float(os.environ["PEX_TEST_SCIE_SLEEP"]))
+
+    if use_platform_suffix:
+        binary = "{name}-{platform}{ext}".format(
+            name=app_name,
+            platform=platform,
+            ext=".exe" if is_windows_target else "",
+        )
+    else:
+        binary = "{name}{ext}".format(
+            name=app_name, ext=".exe" if is_windows_target else ""
+        )
+
+    if not os.path.isdir(dest_dir):
+        os.makedirs(dest_dir)
+    out_path = os.path.join(dest_dir, binary)
+    marker = os.environ.get("PEX_TEST_SCIE_MARKER", "")
+    payload = "fake-scie-binary for {name} on {platform} marker={marker}\n".format(
+        name=app_name, platform=platform, marker=marker
+    ).encode("utf-8")
+    with open(out_path, "wb") as fp:
+        fp.write(payload)
+    for algorithm in hash_algorithms:
+        digest = hashlib.new(algorithm)
+        digest.update(payload)
+        recorded = digest.hexdigest()
+        if os.environ.get("PEX_TEST_BAD_SIDECAR") == platform:
+            recorded = "0" * len(recorded)
+        with open("{out}.{alg}".format(out=out_path, alg=algorithm), "w") as fp:
+            fp.write(
+                "{digest}  {binary}\n".format(digest=recorded, binary=binary)
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+"""
+
+
+def _install_fake_science(tmpdir):
+    # type: (Tempdir) -> str
+
+    script = tmpdir.join("fake_science.py")
+    with open(script, "w") as fp:
+        fp.write(_FAKE_SCIENCE_SCRIPT)
+
+    if WINDOWS:
+        launcher = tmpdir.join("fake-science.cmd")
+        with open(launcher, "w") as fp:
+            fp.write(
+                '@echo off\r\n"{python}" "%~dp0fake_science.py" %*\r\n'.format(
+                    python=sys.executable
+                )
+            )
+    else:
+        launcher = tmpdir.join("fake-science")
+        with open(launcher, "w") as fp:
+            fp.write(
+                '#!/bin/sh\nexec "{python}" "$(dirname "$0")/fake_science.py" "$@"\n'.format(
+                    python=sys.executable
+                )
+            )
+        os.chmod(launcher, 0o755)
+    return os.path.basename(launcher)
+
+
+def _build_simple_pex(pex):
+    # type: (str) -> None
+    run_pex_command(args=["-m", "http.server", "-o", pex, "--no-pypi"]).assert_success()
+
+
+def _staging_leftovers(dest):
+    # type: (str) -> List[str]
+    return [
+        name
+        for name in os.listdir(dest)
+        if name.startswith(".~pex-scie-create-") or name.startswith(".~pex-scie-backup-")
+    ]
+
+
+def test_multi_platform_failure_leaves_prior_generation_intact(tmpdir):
+    # type: (Tempdir) -> None
+
+    fake_science = _install_fake_science(tmpdir)
+    pex = tmpdir.join("src", "app.pex")
+    os.makedirs(os.path.dirname(pex))
+    _build_simple_pex(pex)
+
+    dest = tmpdir.join("dest")
+    os.makedirs(dest)
+    foreign_platform = SysPlatform.MACOS_AARCH64
+    current_scie = SysPlatform.CURRENT.qualified_binary_name("app")
+    foreign_scie = foreign_platform.qualified_binary_name("app")
+    with open(os.path.join(dest, current_scie), "w") as fp:
+        fp.write("old-current-generation")
+    with open(os.path.join(dest, foreign_scie), "w") as fp:
+        fp.write("old-foreign-generation")
+
+    result = run_pex3(
+        "scie",
+        "create",
+        "--style",
+        "lazy",
+        "--scie-platform",
+        "current",
+        "--scie-platform",
+        str(foreign_platform),
+        "--scie-hash-alg",
+        "sha256",
+        "--scie-science-binary",
+        fake_science,
+        "-d",
+        dest,
+        pex,
+        cwd=tmpdir.path,
+        env=make_env(PEX_TEST_FAIL_SCIE_PLATFORM=str(foreign_platform)),
+    )
+    result.assert_failure()
+    assert "science build stage" in result.error
+    assert str(foreign_platform) in result.error
+
+    # The complete prior generation is still visible and byte-for-byte intact; no platform from
+    # the failed generation leaked into the destination directory and no staging directories
+    # remain behind.
+    with open(os.path.join(dest, current_scie)) as fp:
+        assert "old-current-generation" == fp.read()
+    with open(os.path.join(dest, foreign_scie)) as fp:
+        assert "old-foreign-generation" == fp.read()
+    # N.B.: The build stage fails before the commit lock is ever taken, so the destination only
+    # contains the prior generation.
+    assert sorted([current_scie, foreign_scie]) == sorted(os.listdir(dest))
+    assert [] == _staging_leftovers(dest)
+
+
+def test_scie_only_reclaims_in_place_source_only_after_successful_commit(tmpdir):
+    # type: (Tempdir) -> None
+
+    fake_science = _install_fake_science(tmpdir)
+    dest = tmpdir.join("dest")
+    os.makedirs(dest)
+    # A single target uses the dynamic, unqualified scie name.
+    current_scie = SysPlatform.CURRENT.binary_name("app")
+
+    pex = os.path.join(dest, "app.pex")
+    _build_simple_pex(pex)
+
+    # A successful whole-generation switch reclaims the in-place source PEX.
+    run_pex3(
+        "scie",
+        "create",
+        "--style",
+        "lazy",
+        "--scie-only",
+        "--scie-science-binary",
+        fake_science,
+        pex,
+        cwd=tmpdir.path,
+    ).assert_success()
+    assert not os.path.exists(pex)
+    assert os.path.isfile(os.path.join(dest, current_scie))
+
+    # When the switch fails the in-place source PEX is restored and no scie is published.
+    _build_simple_pex(pex)
+    result = run_pex3(
+        "scie",
+        "create",
+        "--style",
+        "lazy",
+        "--scie-only",
+        "--scie-science-binary",
+        fake_science,
+        pex,
+        cwd=tmpdir.path,
+        env=make_env(PEX_TEST_FAIL_SCIE_PLATFORM=str(SysPlatform.CURRENT)),
+    )
+    result.assert_failure()
+    assert os.path.isfile(pex)
+    assert [] == _staging_leftovers(dest)
+
+
+def test_checksum_sidecar_verification_failure_aborts_switch(tmpdir):
+    # type: (Tempdir) -> None
+
+    fake_science = _install_fake_science(tmpdir)
+    pex = tmpdir.join("src", "app.pex")
+    os.makedirs(os.path.dirname(pex))
+    _build_simple_pex(pex)
+
+    dest = tmpdir.join("dest")
+    os.makedirs(dest)
+    current_scie = SysPlatform.CURRENT.qualified_binary_name("app")
+    old_sidecar = "{scie}.sha256".format(scie=current_scie)
+    with open(os.path.join(dest, current_scie), "w") as fp:
+        fp.write("old-current-generation")
+    with open(os.path.join(dest, old_sidecar), "w") as fp:
+        fp.write("old-sidecar")
+
+    result = run_pex3(
+        "scie",
+        "create",
+        "--style",
+        "lazy",
+        "--scie-hash-alg",
+        "sha256",
+        "--scie-science-binary",
+        fake_science,
+        "-d",
+        dest,
+        pex,
+        cwd=tmpdir.path,
+        env=make_env(PEX_TEST_BAD_SIDECAR=str(SysPlatform.CURRENT)),
+    )
+    result.assert_failure()
+    assert "verification stage" in result.error
+    assert str(SysPlatform.CURRENT) in result.error
+
+    with open(os.path.join(dest, current_scie)) as fp:
+        assert "old-current-generation" == fp.read()
+    with open(os.path.join(dest, old_sidecar)) as fp:
+        assert "old-sidecar" == fp.read()
+    # Verification fails before the commit lock is taken, so only the prior generation remains.
+    assert sorted([current_scie, old_sidecar]) == sorted(os.listdir(dest))
+    assert [] == _staging_leftovers(dest)
+
+
+def test_concurrent_publishers_commit_one_complete_generation(tmpdir):
+    # type: (Tempdir) -> None
+
+    fake_science = _install_fake_science(tmpdir)
+    pex = tmpdir.join("src", "app.pex")
+    os.makedirs(os.path.dirname(pex))
+    _build_simple_pex(pex)
+
+    dest = tmpdir.join("dest")
+    os.makedirs(dest)
+
+    foreign_platform = SysPlatform.MACOS_AARCH64
+    current_scie = SysPlatform.CURRENT.qualified_binary_name("app")
+    foreign_scie = foreign_platform.qualified_binary_name("app")
+
+    python = installed_pex_wheel_venv_python(sys.executable)
+    args = [
+        "-m",
+        "pex.cli",
+        "scie",
+        "create",
+        "--style",
+        "lazy",
+        "--scie-platform",
+        "current",
+        "--scie-platform",
+        str(foreign_platform),
+        "--scie-science-binary",
+        fake_science,
+        "-d",
+        dest,
+        pex,
+    ]
+
+    processes = []
+    for marker in ("AAA", "BBB"):
+        env = make_env(PEX_TEST_SCIE_MARKER=marker, PEX_TEST_SCIE_SLEEP="1.5")
+        processes.append(
+            subprocess.Popen(
+                args=[python] + args,
+                cwd=tmpdir.path,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        )
+        time.sleep(0.5)
+
+    for process in processes:
+        stdout, stderr = process.communicate()
+        assert 0 == process.returncode, stderr.decode("utf-8")
+
+    def marker_of(name):
+        # type: (str) -> object
+        with open(os.path.join(dest, name)) as fp:
+            match = re.search(r"marker=(\S+)", fp.read())
+        assert match is not None
+        return match.group(1)
+
+    # Both processes published the same-named set concurrently; the destination must hold one
+    # self-consistent generation rather than a mix of the two candidates.
+    current_marker = marker_of(current_scie)
+    foreign_marker = marker_of(foreign_scie)
+    assert current_marker == foreign_marker
+    assert current_marker in ("AAA", "BBB")
+    assert [] == _staging_leftovers(dest)
+    assert sorted(["app.pex", current_scie, foreign_scie, ".~pex-scie-create.lck"]) == sorted(
+        os.listdir(dest)
+    )
+
+
+def test_platform_parent_dir_naming_commits_through_candidate(tmpdir):
+    # type: (Tempdir) -> None
+
+    fake_science = _install_fake_science(tmpdir)
+    pex = tmpdir.join("src", "app.pex")
+    os.makedirs(os.path.dirname(pex))
+    _build_simple_pex(pex)
+
+    dest = tmpdir.join("dest")
+    os.makedirs(dest)
+    foreign_platform = SysPlatform.MACOS_AARCH64
+
+    run_pex3(
+        "scie",
+        "create",
+        "--style",
+        "lazy",
+        "--scie-platform",
+        "current",
+        "--scie-platform",
+        str(foreign_platform),
+        "--scie-name-style",
+        "platform-parent-dir",
+        "--scie-science-binary",
+        fake_science,
+        "-d",
+        dest,
+        pex,
+        cwd=tmpdir.path,
+    ).assert_success()
+
+    assert os.path.isfile(
+        os.path.join(dest, str(SysPlatform.CURRENT), SysPlatform.CURRENT.binary_name("app"))
+    )
+    assert os.path.isfile(
+        os.path.join(dest, str(foreign_platform), foreign_platform.binary_name("app"))
+    )
+    assert os.path.isfile(os.path.join(dest, "app.pex"))
+    assert [] == _staging_leftovers(dest)

@@ -1,5 +1,20 @@
 # Release Notes
 
+## 2.106.3
+
+This release makes `pex3 scie create` publish one indivisible generation of artifacts. The PEX input
+is staged in a private per-invocation candidate directory, every requested target platform is built
+and verified there (including checksum sidecars), and the same-named prior outputs are only replaced
+as a whole once the full generation is complete. Any failure to acquire the input, build a target,
+verify an output or commit the generation leaves the pre-invocation set of files visible, names the
+failing target and stage, and cleans up only the command's candidate directory. Two processes
+publishing the same-named set into one directory are serialized by a destination-scoped lock so the
+later finisher always switches a complete generation. Finally, `--scie-only` only reclaims the
+in-place source PEX as part of the successful whole-generation switch; a failed command leaves the
+source PEX untouched.
+
+* Make `pex3 scie create` an all-or-nothing, concurrency-safe generation publish.
+
 ## 2.106.2
 
 This release fixes `pex3 lock export --format pep-751` package marker calculation. As pointed out by

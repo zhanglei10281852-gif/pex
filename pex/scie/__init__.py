@@ -658,7 +658,10 @@ def build(
     pex_file,  # type: str
     url_fetcher=None,  # type: Optional[URLFetcher]
     env=ENV,  # type: Variables
+    dest_dir=None,  # type: Optional[str]
 ):
     # type: (...) -> Iterator[ScieInfo]
 
-    return science.build(configuration, pex_file, url_fetcher=url_fetcher, env=env)
+    return science.build(
+        configuration, pex_file, url_fetcher=url_fetcher, env=env, dest_dir=dest_dir
+    )

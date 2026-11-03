@@ -1,0 +1,9 @@
+项目：pex-tool-pex-9e3685b3-0199-461b-9d81-02fc4d9ee6f5｜Session：6ae960d6e498b5216ff88d41｜结论：部分完成
+Rubric ID：1｜状态：未通过｜期望行为：全部 scie 与 sidecar 完成后才发布完整匹配集合。｜实际观察：候选集合先完整构建和校验，但提交循环逐文件重命名；安装第一个文件后读取到 a=new-a、b=old-b。｜直接证据：visibility_repro.py 输出 P3_VISIBILITY {'a': 'new-a', 'b': 'old-b'}。｜原因：目录锁只串行化发布者，没有为目录读取者提供整组可见切换。｜影响：成功调用提交期间发布目录会短暂暴露新旧目标混合集合。｜证据位置：pex/cli/commands/scie.py:409-484；F:/swe/work/visibility_repro.py
+Rubric ID：2｜状态：通过｜期望行为：后续目标构建失败不留下前序目标新文件并保留旧集合。｜实际观察：所有目标在私有 candidate_dir 构建，ScienceError 在提交前返回，finally 只删除本次候选目录。｜直接证据：pex/cli/commands/scie.py:625-657、709-715；离线发布单测 9 passed。
+Rubric ID：3｜状态：未通过｜期望行为：校验或最终替换失败不形成孤立或混合组合，错误准确指出目标和阶段。｜实际观察：安装 b 失败且恢复 a 的重命名也失败时，函数吞掉恢复异常并返回“全部恢复、目录未变”；实际 a 已缺失、b 仍为 old-b。｜直接证据：p3_repro.py 输出 a_exists=False，错误文本却声明 All previously existing files were restored。｜原因：回滚阶段的 safe_rename 异常由 except OSError: pass 丢弃。｜影响：最终替换失败可破坏旧产物集并返回与磁盘状态不一致的错误信息。｜证据位置：pex/cli/commands/scie.py:485-510；F:/swe/work/p3_repro.py
+Rubric ID：4｜状态：未通过｜期望行为：--scie-only 仅在整组成功后删除源 PEX，任一失败保留用户源文件。｜实际观察：源 PEX 在提交开始时先移入备份；后续产物安装失败且源恢复重命名失败时，恢复异常被忽略并删除备份目录。｜直接证据：_commit_generation 的 reclaim_plan 与统一回滚使用同一组被吞掉的恢复操作。｜原因：源文件恢复失败没有传回主流程，backup_dir 随后以 ignore_errors 删除。｜影响：--scie-only 的失败路径能够丢失调用前存在的用户源 PEX。｜证据位置：pex/cli/commands/scie.py:458-510
+Rubric ID：5｜状态：未通过｜期望行为：并发同名发布不交叉混入文件，每次可见切换对应完整代次。｜实际观察：发布者在目标目录锁下串行，但单个发布仍逐文件切换；受控交错观察到 a 为新代、b 为旧代。｜直接证据：P3_VISIBILITY 输出混合集合；test_concurrent_commit_lock 只验证第二个写者阻塞。｜原因：写者互斥不能使多个目标文件对未持锁读者原子可见。｜影响：并发发布期间消费者能够读取不属于任何完整代次的文件组合。｜证据位置：pex/cli/commands/scie.py:435-484；tests/commands/test_scie_generation.py:231-272
+Rubric ID：6｜状态：通过｜期望行为：单平台、命名风格、eager/lazy、覆盖旧文件及保留源 PEX 的成功行为兼容。｜实际观察：构建接口保留默认 dest_dir 行为，非 scie-only 将 staged PEX 纳入候选集合，命名仍由 build_scies 返回结果决定。｜直接证据：pex/cli/commands/scie.py:573-714；离线发布与命名单测 9 passed。
+
+关键原始证据摘要：无缓存离线测试 9 passed；逐文件提交复现 a=new-a、b=old-b；双重失败复现旧 a 丢失且错误声称已全部恢复。

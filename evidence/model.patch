@@ -1,0 +1,2717 @@
+diff --git a/CHANGES.md b/CHANGES.md
+index 21a773aa..f710f03c 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -1,5 +1,20 @@
+ # Release Notes
+ 
++## 2.106.3
++
++This release makes `pex3 scie create` publish one indivisible generation of artifacts. The PEX input
++is staged in a private per-invocation candidate directory, every requested target platform is built
++and verified there (including checksum sidecars), and the same-named prior outputs are only replaced
++as a whole once the full generation is complete. Any failure to acquire the input, build a target,
++verify an output or commit the generation leaves the pre-invocation set of files visible, names the
++failing target and stage, and cleans up only the command's candidate directory. Two processes
++publishing the same-named set into one directory are serialized by a destination-scoped lock so the
++later finisher always switches a complete generation. Finally, `--scie-only` only reclaims the
++in-place source PEX as part of the successful whole-generation switch; a failed command leaves the
++source PEX untouched.
++
++* Make `pex3 scie create` an all-or-nothing, concurrency-safe generation publish.
++
+ ## 2.106.2
+ 
+ This release fixes `pex3 lock export --format pep-751` package marker calculation. As pointed out by
+diff --git a/evidence/rubric-comparison-report.txt b/evidence/rubric-comparison-report.txt
+new file mode 100644
+index 00000000..623ef30b
+--- /dev/null
++++ b/evidence/rubric-comparison-report.txt
+@@ -0,0 +1,9 @@
++项目：pex-tool-pex-9e3685b3-0199-461b-9d81-02fc4d9ee6f5｜Session：6ae960d6e498b5216ff88d41｜结论：部分完成
++Rubric ID：1｜状态：未通过｜期望行为：全部 scie 与 sidecar 完成后才发布完整匹配集合。｜实际观察：候选集合先完整构建和校验，但提交循环逐文件重命名；安装第一个文件后读取到 a=new-a、b=old-b。｜直接证据：visibility_repro.py 输出 P3_VISIBILITY {'a': 'new-a', 'b': 'old-b'}。｜原因：目录锁只串行化发布者，没有为目录读取者提供整组可见切换。｜影响：成功调用提交期间发布目录会短暂暴露新旧目标混合集合。｜证据位置：pex/cli/commands/scie.py:409-484；F:/swe/work/visibility_repro.py
++Rubric ID：2｜状态：通过｜期望行为：后续目标构建失败不留下前序目标新文件并保留旧集合。｜实际观察：所有目标在私有 candidate_dir 构建，ScienceError 在提交前返回，finally 只删除本次候选目录。｜直接证据：pex/cli/commands/scie.py:625-657、709-715；离线发布单测 9 passed。
++Rubric ID：3｜状态：未通过｜期望行为：校验或最终替换失败不形成孤立或混合组合，错误准确指出目标和阶段。｜实际观察：安装 b 失败且恢复 a 的重命名也失败时，函数吞掉恢复异常并返回“全部恢复、目录未变”；实际 a 已缺失、b 仍为 old-b。｜直接证据：p3_repro.py 输出 a_exists=False，错误文本却声明 All previously existing files were restored。｜原因：回滚阶段的 safe_rename 异常由 except OSError: pass 丢弃。｜影响：最终替换失败可破坏旧产物集并返回与磁盘状态不一致的错误信息。｜证据位置：pex/cli/commands/scie.py:485-510；F:/swe/work/p3_repro.py
++Rubric ID：4｜状态：未通过｜期望行为：--scie-only 仅在整组成功后删除源 PEX，任一失败保留用户源文件。｜实际观察：源 PEX 在提交开始时先移入备份；后续产物安装失败且源恢复重命名失败时，恢复异常被忽略并删除备份目录。｜直接证据：_commit_generation 的 reclaim_plan 与统一回滚使用同一组被吞掉的恢复操作。｜原因：源文件恢复失败没有传回主流程，backup_dir 随后以 ignore_errors 删除。｜影响：--scie-only 的失败路径能够丢失调用前存在的用户源 PEX。｜证据位置：pex/cli/commands/scie.py:458-510
++Rubric ID：5｜状态：未通过｜期望行为：并发同名发布不交叉混入文件，每次可见切换对应完整代次。｜实际观察：发布者在目标目录锁下串行，但单个发布仍逐文件切换；受控交错观察到 a 为新代、b 为旧代。｜直接证据：P3_VISIBILITY 输出混合集合；test_concurrent_commit_lock 只验证第二个写者阻塞。｜原因：写者互斥不能使多个目标文件对未持锁读者原子可见。｜影响：并发发布期间消费者能够读取不属于任何完整代次的文件组合。｜证据位置：pex/cli/commands/scie.py:435-484；tests/commands/test_scie_generation.py:231-272
++Rubric ID：6｜状态：通过｜期望行为：单平台、命名风格、eager/lazy、覆盖旧文件及保留源 PEX 的成功行为兼容。｜实际观察：构建接口保留默认 dest_dir 行为，非 scie-only 将 staged PEX 纳入候选集合，命名仍由 build_scies 返回结果决定。｜直接证据：pex/cli/commands/scie.py:573-714；离线发布与命名单测 9 passed。
++
++关键原始证据摘要：无缓存离线测试 9 passed；逐文件提交复现 a=new-a、b=old-b；双重失败复现旧 a 丢失且错误声称已全部恢复。
+diff --git a/evidence/screenshots/01-rubric-comparison.png b/evidence/screenshots/01-rubric-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b936bf0c0d9123cbd36b2d9abdba30dc350f693
+GIT binary patch
+literal 72353
+zcmZ^K4OmlWwsq&5u~h2NY1KNk25;+(RAQqgT1XCo+ghX|O{4)cSOQvsT$m05`8fti
+zxYa7-AKVsW4CEwL3IT$N5)nxF8APQ(NGcE^KoXTEAtA{T0t5(w@8H}!z0dc}JP$sA
+z<Rs_3``!Cpd#$z4A1229*8eU4mtK15w+BD{<nxza^4t2-OTUu6@-p&2b^GZC<lC?4
+zpT~Usl1#JJhWzpy+DD&#^wLYWOJ7|+z7F|)ea@#z^p{===vw>ttL~FEX)nFBT6OS~
+zj}lI$INJX5-L8Y#X<xkhWQDS?AfI&Oy~m%3rT%|Y8@9jee%AeM&ZM6@B2<cVTzR(a
+zj#@>&OnWwTz4(HytG<p^Px0gF5E%nJWfzvU1*5u0nO4p5-=F*MuZ8~Q{qM{yrQX7_
+z8f0N>7s44Uv`2e3kZya$yOSc_AyIDEL+HUO>Tl+u01cH`@CR4RpRND%5nX$hGX|o<
+z57ezjt7bs@+UGvs<c_*{?)a$-&}w0A0}l>8L^e`eS+x2Mz<3!u_M&n9_{2z0z~682
+z#RbSMM=ht`)2)VTk{<Oqem)nq*kgjc2K#qDZs`6t`yg3x0Zny%ui4NzLYM<{0K6By
+zdPNFv@#;&|(jQr%w&P5h4{jc_ak-#@0L7`_$PoR!k>;BD83mZUi5<_fqFnJu??x?Q
+zCXP{@KSo$;a{cCj8W&{|Nb{+;OOo0zZXf&TGdBDU9Mdr)OkoGG77VN>|7)3kzrtT#
+z3fsEa@rk>rQ?tVVOVv(g%hS~#+dbl!;Qp46&9x73?km;Hlj-eK==Up?T4k|YrUn?U
+zCxyDiQH+DWBZ6$MZSjIVnhD39DnPzpqTS#Y!v6-8;+BLeMnQ<=PH;Tz`;1Y<4bIs{
+z%L<NEs2#J|Is=5u%G!pTuDwaGk+$~TCk$c5*v8&q`=#D5lrvimyXZpbNN0c*h*wow
+zMAVe)g;j|)B?EZlFA>^M^!ZBXx9cPwcQB5XH$~hgi6`o;vT0yz$lLqOs``N|aD%@Y
+z-G99ymY!dgxDp@_QVFpMM>2t$_5q>1A+~RJgARx5urp50;SKg(RnUOJ>>6^GWs}TT
+z=9^|_!Rzzz@-k1p*Gkc&QdG^Q*v5^f^v%7L@<Cp8jmxnNeO1j|=DS+!C6j5x?AJ4t
+zDm+_a`e+`Tgk>&mPAV}~o`zg0S-<RvJ*P&Cau`}c^`wRSE~#T|&@2Af@I@w&&{2w!
+z?lr5v;zK39A^kSqkwxl}VyY%EM0y96keaEXBvqy7pR)^v@;j(;Eh#szgRE2~Yiyeh
+zDPbPuRy~#TlnybbB2y!8pgs<AO~g6xgGpy+cos(0&N`u+m(tcT5K@%cd!o9Fc*LBl
+z=t>_7x`(1XSq!}0g&ME8T><}>^M`KsKho#-=T<G<tDPUL@B^23f0#f_uaU;R3`$*z
+zMd>w(_c^+3Fp|mZIh>TGU;HK#juxYqboz0Um=T(ol1Y@`=|$dd!m~d$op*$Zs@wm*
+z@iS;6Egv%+&AehMG>$Q`V(%4FT?9?%T==u5@Vmu`v0U0+<*zvzlhLV}KiEUNRyO0k
+z*wRR>ur|?3Kk}B=q$g<??MeNyQ?m+%LbWrQXp0aBiaMs;<7Dwq6zw0}Ka!LDzyvpt
+zYuYWwj<*9(l3KSY9IySd_|J=$7ox)3!xwkIQj^GuZp02M+^joQ=t&hp$U8E(InlT%
+zc&x*zguQhwN_lU5us*U12OVupUG!%SDMlrs0!<{gl@bOo$C2^aSaJd?i)Uq+)9IF-
+zmsea~W?@D+@R?1BG9;^|#473>w%<0c-C#v0c(J7Zp-Fdy#_?0-<7vTl@f?n3EU$G=
+zsuQq1h34tyT`_+d)`n`}|H!Sj=50276-MbK7{GkL2r=Ef^Zk5P4JupH`b%m1{mRde
+zqrzFo!{%$j!)+Q4uX+|Elg<u$<EOsQmsrtlU3S?@&!T3c{*FE3b2IPp^rjH`o!Hcx
+zWHW8g7yU$fKBezRBguK=h#3&=XI{B#6IdBmieezeeL7MxBwG?#Cewhxbp^uOou+gw
+zvedf8p%iQ*rcQFFY7lu>-4{z5FQ-Dw&UE?0X(`prLJ4hU^UWz5Ou8IN%bLZ3gn^#+
+z&<kpML2Wld{oPk5{fwpF<_hF#`a5^g)?u@&BmcXUuZ2fEzT_8^<<Bp$X{3h<M#^=3
+zEc{FvYxRXj4dQEpv=k)oN#VGtsnqGs;5-`1U;(i%*^HgaQC+dj%I@xWNT~ofMtc~N
+zJ)VYwIK@-w{>AY?5cGXjRE@*yi4Qxy=xbm~w^hIkYV1v2dy<&<U0~2tA`;jE<5P4<
+zs*~xJFCf+8a*cZP%?UKe>I2%hPbD%G7%&lpzaQxdNeDw8j3OG?s?IyIXClM?%f{NX
+z+_SAH=hEtfUq_uNxp)OhZq{L-vbr$3(6cd_V$=DQNBwkC4JFyfeHXBzJM2YesYp@k
+zV|;E7i8@2otOaE3xYbHtL=pBgYjTe?Um8TI>8x@$h!ikzp9FoG5sGPYuUx3BEUdz{
+zDa8ZCcvXX2+Oq$ycr<wV60v=>NFvWD?xjA$w-10u`Ako346DI^7`6+=pFj`9o#lx~
+zn0V#sB#nPYIGMciziQ}eU({5`D?hGmnMAKf|0=h|9uVlrdyQ6=?!#mkk2X!vjuxL>
+z;5Hy(<)!w|);yxPiN?%8J(o{c_9m<Z)R8XJt0|_F#r1N_F8EHI{7211YbCCfZmCVm
+zMDlegqyzgRD=2vY4C=IdC9tcge~5K#7?NwA*6($V^w2e}`_TRUv%;%veWYgSRH_A}
+zNt}~H=<zg9)V6!yl3ef>Cks{TNTWm=`{&S*_!FBB{QSByUh2BPH5VU`%Mw;T)J{r0
+zf&X*(|Nh)l(uyx^t76qG2(rcoW4c$*a*G#I-)Khlkp(p^aa)G_HS)szS@e;}sSIzW
+zB^1?=!s2$*cDO@Q*&pl|bNIDCD#zt{M0ja)gjgjcmI~(LIQ)7oUBCqC?Y#-jL7vbU
+zs`FS$5XVyU2z-mcuPw|F$_g_kampmo&3pj~&Q49gVtmvL`Ze-{#5QzkpnaBFJ;8*p
+z&GF=+>YbNGz4b}#Ix!m)gVZ@<)O4cd!ZsTJItijihfU1yyg9(8We7Dc%yM?KTmkf@
+zrSK|Q=_y+E|H>Ssqz$hgOnkP&&#LNP{qFi{gEZo{JM06K7Kv~XcC{sZLl>E`>V9Be
+zSk0ELn0|_-?Vd{g$a$%JhI+MpW)mi+tsD*4!a2XxeeSFCua)RlKmJUtsH~W3K;VJO
+zv+}0J`}eh7z%{RiRSb3r92!ZAI-zA@HK0Ua588kGOE#EFd}k(}W8+t&|2lvd&byus
+zTFZjrE`tydGJZq>Z-OrTanG`0`Q*gOqE#@@3bwJR2KGRdtx#D|1?Ll2KYT`z8yB-y
+z%a(su?Kb)XNKli)Q^75g&yrL!>ugBn9V!cSSfrvsu=zwxG1{7J`>u?dWHm=m7QHP2
+z83YM@OLZcwh~fz#YC(boTviu+hqj7XRILq2*5_6ggqaxp<KgKZ&!5b^`QN~J+V9)H
+zb$FuOp~M1GXi?7cmqhOIgy5`R(2*woz95n=$DQFc?tj!Hv<NO^VQu{s)u||(Q;h;R
+zoQb)xg7K6sUWRA;$LBcR1QoCda0VonV|U9D<XKXNl1<E-oddQRVSppo_%zlNAQPFK
+zDi~7srrnxYnpHk;mEMOUq<B6a`~W_7)g7RsT5xdQ0Em)M0;`-2iW9yP2jffrQS$?L
+z10CXqQ8dT-aAMnbo8_7{380DY`64QA$tNv%<bvl$pn%ozbF2rW1pkT~&ds0Q%=7$#
+zq7ApHN(RvjPz!-5FLWKbMQ@bfIesdPQuG?=#lW+MxR<@lv@5rwHbez_fHsDeCS-^*
+zR-P<85H8=V3D~y}zK0bZvkHlKdz0r5hH2reCamYafPJsE9NqS+S7<t40Iuu6-k8r>
+z`R(#UaOvd*@6g!-1jKp3f<OScW_Ik24r^)%W~eY$*U|n9rvjMwvad349Xe87#<}3q
+z7dBz+LYDwFj(kJ5NeCWLT=E7f0=(3bKcWYF8YVLQ;Kx;COdPYc<bXJw0ED?!X$G}4
+zZyK63d=`N|(>B7SSCwU#B<aYb1Dgd~u;bD152A_rw<koK3&T7m)FYlWKRBnG6LN}p
+z*6voErbg1MJ%1<^ZzL*R96+_;W8oci7DK5InAi7Brk#75sq83THo$*FMU=Adxw6GT
+zUCY#OyGWn-h~$Z6Hq{9&cdh>J@apmB0ip;#{HFH$$`I;Jz^h7XCt0NWNBxFh6}=qj
+zkhKq7l@-3BK#c@Lm--&!+@bI1f0AC~yoVB+)@jX!AJ4l_`MIpD;AK?LF;57|>3f-I
+zyolniqUs><CqvIxnx84N*q}It*(V{Z@aQAey?C+dAWwU&*sYorjrF$>Jt|5)45fL8
+z^o2&9>~n(vx6bsSGewPtj;;fQs8-4Txthf0l7ZS>4Z~<?+uyjKfWD$tBpzVu->K_H
+z#gmOtf~O|JF63$8G`~htKXH4a<v!&tA9)B9HaL|t5KqtqCVl9ZH6TR@e=;WZsD-dz
+z`y>wD)Y#WQy9tUr@K_sRrh!Nr&NhrcZ(F`A9@BaBPS|pA?GJQUK4}{7?rni5X<SKE
+zt9Xuneix*twn@{UXS+N#Gh0?y-YyCGes47M-}$Qfv}WHB&h(MB_#<LNUFDq%Uzt?R
+zQx1|---CVIs_xrsO~<yO$6KTqfkB%9Zr{S=ln)C?V(;wACCD?@!!0i>s9Wn24wgV<
+znd2#;`C|Er;3<6T+s9+(z>NHW41?@ccK`wy?%PNMxH3W3k<s#6@s0Tw+Wfn*bb~a_
+zifcZj8joXXGg6)J619a@-xAN=>hf%NJWuM}s;zvJ>B_qWv&a{*V1^1cZjIPyI>;*B
+zCHb-SD-Wi%Z^`jr&d(Df&wJwWxl6TLPa;g@_=)7M!?uvhhFI0BjbCI6+9Rw0WC(B=
+z&yT^gkXoko$l8C6v<;0Fo{MZ24*h<G?YGwFw7K8d!FMNW9R`Q!?GC?~rU?z@sNe8J
+z%d}&Ii(M|YD%%GSUY#o3&5J6$x}ZqXPFvq9;@W9F>=@}`6f@NtgIVp&4f7rxC-7u<
+zfDwJccN`AuX@D!wtqLdb;o4)8uI!V+TJHl4vyo!P(KwBgS3%0HqAfZXO03^UUVVT0
+zj%O*;!|5yv*yOm6X)Ng;4{(%a6LVuuf_^4aXMk4Ei4^dxk?ZFiDMWH>UgF)dma;)b
+z9sEs==jhRwJ@>Ph)gq{xRkIlI%$wkecxQ|ZN%lq;`W5%R_x>R2&qXf-5j13{#Jf>=
+zY+=+hd_<RRD4a~!Vv4p*bB5J%=6Gvi9lR7G+5263XlV@`s`^45Kec3!TXG~g7z-ue
+z1P)&=&*yGY(H??7@NI#}hEdh9qHJ#PKa(^U8Y^G*s#Mp&H7H_pv70rjb}d8~^%{Fz
+zEr~1lJEp`J>kf647i|RF#&iUVw<{1VgtKBO(!-EFYRi@RFIS%Y2cyc+sWC!dJ&rFw
+zk*<Hb9Dt{_hrT-8XBm;mG&io^E~9;@devGrjY<|N1|}l?yxEkPj^5EeV5U7nEZ88L
+zt60c{X9rycJO{^?E1TW;SXKrFqjVF?o0hd-f2zJung=t?Eu?3&X69iOg3eB@7=)ru
+z)j%-1EL~-E(S?h)Wfj|*NMmTept@?Fh_XwmS?anVT1+tAuT`R=FaH6frR_ss_8bO3
+ze^30DwJP4~m<^X(7Y>fJ{Msm{y)jP-t{}}3&w;7pfccg);quWw)lb2giP_0+q*32o
+zxaI8BVeKU2YN}auqX1(%s||3)*9Zq(|L$~Vp-i?%Rxn148tD12GI5`sY3)T;rx^~3
+z*e&vg9d1K+@CRX<#GNotWNB~CP{mPx#l3Z$!XrP)EvEZan8noUR&ow3({^S-MY80`
+zGX{TM{L$`J?Y6B4cQwTQg+R7u?*l%2)Q?Lh*<w{^pf*5XU%B^2J7phP6}v2O-6Pmr
+zumA#5STkx@Yw2K(oW|p1#?qQD_5r>t4x_*oQM?oc{)u*=Aua|K?6Mw<I%5bJf8F!m
+z<y(DUS!&~kD>aMM=e}o)t*=^Rqu$|en+;hA`eu<Rv8Sdx&63{V*>&};j<Os-FmaT0
+z+~W$7?|lP{ff-BL{DSK0*0>IT?PYO*>j`GxAi3t!fa@Fh?yo`Wap#1j_q~RKc(R*l
+zdgP>+7|gXB+;vl~=YOzk^eACBp-|%RA+2skOPS~2hS*_NDTbcyn#CgPiCmeshulwc
+zm$*}C!h6&|r!G7083HAQH@vOdnHs9?aAh}%*E5+Gnh=$x^Sx4#t%+dnz@moQ@b`&#
+zx97K_y@jstS*8azsJT*EIhYvL_Z{FWy5~wNj9Ldc$bF1^$wJ$==5DROEBtG3IB@xS
+zHoy_xEVO<Qb91mXl1^Rg!FXiav>+0jRFZOT^yYF6y1z4JUaj@#k&m9Wzjt%OH+?d^
+zE~lzZgp(Eq@9$>|0ptYXvHXAnumLT{$4c>m!4UOvpn?7+hJ|v_V`#FG9yj-PA3=x;
+z;jhsQ7sq-Q54s{Qs={eCyBf1t2xr3b3ob~MNO6R<Rzk3)vA*oK5_r+umb4#Yu^#lQ
+zL<7`fdbRT&*CU`-Io0ERKnC><)n*5Gd$1?1Sn+N~o%O421f5mU+bte^*X}TU#Cn<L
+zM~A?S_E%NlJ)dwr{P=613#;lS6L^&Sr~uZNlyoIFYOy|J9adMk4jguDu-3w|{nliD
+zl9p#-B`Qa&^3<X7`S5E`9j)1#+b%&T@p1p`rEFJL_x1VrZhk32>UKe}#H#4lvkk(^
+zvYs4Y6_Co#t|kgiKG7yMU3SW>uXRlrDRYmx_k<Pl&mqe78EU_+we)nmJ+jAzOKhKz
+zUK-e>o(9OK_c^*mH<S}*-Pk65pHSe5EgGdL2SOXb1l1({2%DeF&MNt;sT`{QlWMzz
+zJf{E5`5U9w+28u$FGV@(!hPuEhc;C+Ay)EuF%)n(!VzRN8vsD6cJY>0I_;!-PijBU
+zIM+iICAGhHoV5iEfOXTaC?M=9IdTAW!^NJb7)@Z}-5IHHEttUtDioibKd-o6UD%D5
+z&cp&|RpIDsxmYH@=UD0exZsY#s;g!kaCuJ`&K-`vY^t15VZje7Bm5LX^kZu12>ZJ-
+z_sG-wzX}YrreKYWoDS58&knGfC$iPdb}XMlf3Oq~IugI9yX7=nBj`@bEacCrwXx*)
+zNSWVQ)2uB5<v=((VTVdfWoQo@51r^Z4UBU&{-U->WJ~#3)l>hW$DFk%-Y5DE!y3UB
+z_y%JgY(2J{RSQ33r7i6ouVj%6f+?C*1BALg`1Fo8$ZNp4$K#;zC_85GBaYuP_u6sM
+zXi0}CQSxh;<(IV$u0O0tLK91`sUL7<cs6j0{8=MTSG=m`fgng*mD>M_bMju0l?*it
+z2UMdfg!RP5JdRIc2JO@EBzuc{KbN}3z6RcX1iN5M2+NbU7`5_bL{OX9UcMPAsMPVG
+zDsn;p5OGBRsAnd{Q7=%QX~`;4x>-5!=T1$7F4;yEJAM`z*xO>lhI?p1$3HCK*8uXq
+z(QiA6j*PcBn$3DbIFMYT(glLK$|iafijXzlk4+HYFX=@)H@TkGAA8t8M8XCv39;91
+zW_&DG48DRD!aH0PTD){79^|T_8?5-TIjK4Tq83U}&D%wR9L;P)O7}(XI&YSCJpks=
+zqA$0*o9V@l!f3N<tJU9vGaVf7r;j@rk+ip-y1tUQuT{F1uYIux7Qx@p()M&m_C!R}
+zB)y;#1tDmue5_lD^o2iTcV~o*<a&o43}*GrL33(nTjfBg627Mia71<L=qxY7uwUzG
+zP^AoAkw?rao&~D{n#4fJ5LH<d0aqTIx1$<l1Iij1Le`Gygfe7p@t@fw4p-ewZz;&)
+zen?9Z+FoCpCi?3r`TSEsgp5r(UqkyZL3s*x!-tu*xw42VT*B3(OjE#gn=X<&5Uf(3
+z2op0cuaz92jG`P4LywX;N57%jK$94L<vF5or)W1j=*0sNJoz(wH`1`M7<8!6;`}*e
+zmB`Y3uCGatD&5#z(SFY?G#+oGJV4Q+hk~kb94k>3Ns~bLsKU+aoazHn?&K0=7YFdD
+z<ugbKpaa*Q#-*%a98y|Ff*6m@PJLNrKqX?_i^N${vr^(+3F+2o#@Vi06&<IS0wxpF
+z;BxjiVC{?p7h+1ka<wypHZuc04PXWUeKbr4we*%$1U+n#qEihA3GT9-?)CQMv+f$u
+zgJa?C^>fgBBi4ZL*y<W=IORTdb}NF;w*sgPgAZ3mPUTo7Il~%bU7x;_Fk3_D<k63S
+zw3w^?5lcyTr*6VgUFPOPPOv#{i2ATI!s^d6wY=6*7DBpa-O9A4BTU;r0`mDqY#W*7
+zsTY%81{^fS;N*0f)_*C>uMOzYoTxst##2+B1}-l*txZjj{O=4wq8KRclI2^1ISo>v
+zu62et|1m<+zr~p|=V<0}4I2m=RB|!iTD6nIhfqM0?zmVnKs^^kr*v%7IkScYwU$_U
+zMEAjBLSt7Zb)<iu)e3~_3`j~z8sfjuh9KnNP@O)Lhy+*YNQ7k7v%~e=57i7>B(_hz
+zc_`@bRFIo6DWyGYr9x>f>b^WXbnTs9$wU3^iYZGXKLG%g1*`;t+C-3c@d%DQO@t=4
+z&p6ChzrLi4+wDdl;R8ZhO~X`)hBiz9>f+3*I0_xVPg9aDt4M9{bJ}|+TKC?&G$lHf
+ztBJ5{rt&~B9M37L8|zWFP9YkAc;K(SH3f-#`t;wLLr*SJN0`1-m?)Hl%W5LCSao2D
+zXaJRHw1M>efC3>Z3FDrm=}RP`DEO1@V0!Y(TwxW$pIhVPrw#RM)H88OQa->I`&$y5
+zW=JCjvYE6Dd3xI=L`we<_A?uhz(E*a>HBSND$ch)HJz<RHHc<TZP6r&-YfMcJY2-|
+zCG&Mp17GKp-L<ZonO@51#iE7JZ~tzeWg+gfxhtmrJu$n_s7{ELV-Op4>Hv)ryni8E
+zAm3|7m$tZoZ|nKC**aCNb{E|bP+jYHRU(}{QoB;R<$1deY>C71g|)1V`VC;fSQUp-
+z(<e<2da{j|fyqa-9hzPWCqrlzDO?Cm=<MAJf7aj6liVp8?y2$OuhnLp?L9o<K;l=E
+z4>Y?5&{3M$iMY#=jns}_M~<>@jx|SoXzRU5w>Yy7fhm5vs)tGJq#gSWsR)@)R&^og
+zrjU49F*xjfV?Nn*J?{{imZL!g386~qKHrCHo1%;xO0k4)o0i1smUUmkmoYdza(P!e
+zWb989ose|ZFGXI9NA`iXm3r!A(-&-)L9kt2W6kP@ghDf(2xqV&G=ONPHuuP$LEqv{
+z;FE-NN2ABh^C3fokk6bMSGf-~J}l{xq2k-ND8iEZz5o~9L|#;_)i4Ry({}AVmhh~h
+z&bqe>ezNpu@aOC(i;>gb`*~_mqrYg1l_uB+l;$+`?kt5S;h%};Ii7I=iFwwm`Ba^*
+zFIxR=_fw#Un^U6eQR;WQ5z;yGpeLf8{+JxJuU&Db;M3qTbB$b}tgPspfv{M)YQlfH
+zg>e`N{cN%5)hWZO1%47R?pb5^cCVDs+Rw0~?{=KQAIb~_^t(uqVh{%)j7P0fw=y|R
+z?5n)WY)<XelsQDhEtNC81H1d)ONh*J;WR@w(|RyZ!^o1i>{sVWM*Dn3?J)@+J$5s6
+z=!!;f6QUcIXA&M}Zgw<NsR{hIX!dEv$8+*qbXLUfdEpU5DbRCX>pgI7BJ#WR$?09i
+z_8bq<a(@D1J;6kWZE<gQ2!#{P6PL1LW^vexev*PNDkz53=OwcXP{=hoE546m#vUro
+z*;0^{@q1&m)$?B+W59D^%>zR=>-pAVphD{}!bNB$?H&?@kRhgi+(Lnt#ywE9MdZUE
+zCqTy~*Y1R1cP1W8JGXi)J!d#L$1`b1&c!+dFNGc4a?&g@t%ekNy{Vl(cXg;bqYW%b
+z3s%h(MnwlJ@`g4+oayWj4k7(}?&-0KSriLQSnOThq>6ei16S4?oYe01k{3aRX3BW8
+zcf8XTn3%E%wjQFzEVp#;nnMi*4uzy<QkolfvkX9nXu#ORb1%APH$7VG65}aJSpre+
+zfbDx@)jj5w$J3%T&v;1cVsNu*=L4!B0CeK2=v+_16a)F&r%3I#G<;==Hkog@LN7p$
+zJ<D${Xb;V6Ke9l7Q$YO8E_zzWYkl-R9et3BI4MkBq&_Q|QyW0Bd+)Tj;De%^tq3pP
+zE^-td&M=aNLiRw<k`P=-@RY1bS|(ON$HJRNA12reF+Lsd<OtW0j6oenpIfPu-|4ta
+zD)O6J9xM>f8~Y*8xZy#B^@5?W7!Al79cLkMqz8`&QUdv3q`V9O22DT~RmOmyz3uuP
+zu7%_f&Tgl8qt2_0yn=A_f|lavdO<V4pjdx5y?Q)nZuQ%o#?<NA6$yK3h2lwdQX<+`
+zGaI}#<Df&Ra<z1!45}w98(83yBe%H1fJJspn!}=hs)q`Gnh<t=wU6dV+bn};r8RBK
+zn#6~<%b4sc+$rsg3m!x^mS}zcEPS(Qkk?(naBU)3!q@O~(m9X?N=)Xo*N|pu?4vo}
+zJVr@#19k1YB>>9}Zq!D#9MWCa!iTT37{@(72RTBNINoKfHskJ?-UeDOL5^PVI4IGk
+zJS3*1vp=j2?X?C*l#Z5=SZ+fJQqc-F>fn2>9#jKH;Xl9Gko@>*YZuRjatJ%h5^rh6
+zTaKHYxkoLqW{oj_o{4PJZU63zdgaR9E*<v)q6b@S-c&=;-&dv9mAXi}MX&C|bHeC<
+zG+kFID#&RD{+8o0nfGldv6XgfOm8|1ypSCsM0WZzaw5%&8Bgs$1VlS~Etj(IR*(~@
+zONFK~5aIo4HP}};8XmC}r#U3e!6B#@ILfapXwrI^uxlyX52<B@KC?1^o-0Hk9Kcxm
+zpsR3Ss!rJ5GSEZRT%XU8F`nfO;nv!9r$vQ(Kpf_HN*1tFtP#moo4@g+PGXZ}a+arc
+zQ+8CKNtqXR@!6<n-T`vUB^QRJymg4E>8LO$PKaP>4s~DZ^c5seT??6oOQ=ZBN)y(k
+zeSR>~=k?g!==M48YR&39(U(`d;@UQFnof34rCm8N!sL9M+8>NSMppBv{8awxU<7AX
+z>Xpx<T_Z)^CFD8<dUZWZlaN%kGdY{m@i9mXll-XEe1VVJETAm*PGt$&&y0SA92htt
+zrG?ylu|To7{?vhefD(rw{=YAkL5&cW-8lDFb<UAJU2KZ{#SvAQIQ2PGJX1?&;b{^=
+zw5Oh;x!xeSD{3ju=}v6!*sr^&Vh8oi=n50*L9{A2g!njcG*LM^LG;!dd+X<VnjIY`
+znPdqj;t-N$>+Noo5L;L82IqRWL%XoT|5>Ud9ixgV`jOU9#4+K|3h%gRpeqV3JH_;F
+z`qEAi_P$9pp{H6*MbT@5|9y|b?OtS!7o@?>5mxwn)_q?u?ds^xh$cGsfo>%+lEZz_
+z<CCo<D}BgW60_NnMTE0r5jJfj@8VHwQorh!md%&?E+CGH{y~p+zN1wwUjlQOtNFz)
+zkxIcc^^f;!1RuQJLAn>DqRgThU<R&TdK${ILIO3#c)ofWQ#WSlhg(i_TsQ6>@)#*S
+zticJ#B+?blGZaZBQ76^`)H;mz{2HOz5J^X*VDG7nmkR>3!n`_qb#&=Zv|zVX5H7}>
+zzTH!q4}V`E>WjD5&pLd9ma?yCmh_ed>>nKs)+M_T{g%hQ)z6c17MKvSvv<r+IPifE
+z`j*BE*};9&CH}0x_AwZ|r;GNW*)Pw%<<p4jDwiJ7m1A83(dodou5BHC+OQx(C0tc)
+za-?}f3HcFSo$aI1!j(UOA{%R3m4wUsrr=qiI%H(*EN%4<EZD?`*VgjnmsZu`WE);)
+zw0)5SzrJrt*LntzbX>`+Az9)9WwOoK3237h*$xZE`U7RIc6F{O$FVSkNH>j9%e%OJ
+z+5#&<)QfkG-0nkGaw?xRMLFek+{@mgqn6{(yv2Doi`1tzt+g>A+cR*5f4hRxrU~GN
+z0Xf4vvnZ79t=o^c55D7oUB{aGh<sWILS&kuH^4l3IhN|I&!`edl&R_96Qd?>l7h|k
+zq?Kal7Hr2n>y_5$*>=&mxphw6I%SN$i*@61cHw$oR?5*WEJKP$lHYAbow$nkBtx5_
+zOQ${6@Dp$Pt+78&u~?KqGjpFc5u4jSh-Cq2Z4e^W3(;^D^Ekzs9&<fEYe%n@c(ymq
+zlT-e&a|fh`#@R<2FLL*l1-DnIJe*f0FmrS}=v>T@wNCI{Cu4kcjo_#m&dG~pTA|O|
+zrZAwR`JPH^BAg6c-8&sQ^ID0J#9XT>V*3xh=_@l0aeRO!e2({!X{(5u1{Ez?o9Of8
+zq;3?z(&MlhRQbTLHfsAA{j5uqO^j#S=#e^AWXpF}?Pr~s#yIUrzbeQ|mCdW_=?k?v
+zrYLY{Xlb)UMpWX?+8@IE7XvaBhytU;@vTCe-6s`L*Qv6LXTpJgwhmcD_rQ=hw5*?4
+zswm)oS4LN&Jdsm4?u^$dy1oBy8S=&u{I=;bm)2f~D|Oczdk%NZa2%Q+W>Ah?&18lO
+z`Hc3x+~I(XAsPAo{M;yoP;a}38sDhB;lf|o)kV-Jvt!B4LghwImS!UEhL(=_W3I&)
+z05t)~Do3nl<7v%61F7^UdBzP5B`vW1;%P|ykOwvow9&gsPi6_Ef{w54;@jpAx{x&m
+zaRhPsjO=jRpJzim>>X!F!VbEHI8VI~_`H5G7hD5Gd25J*`=~B8+=_z|TGXj2S8aI>
+zm2O``vJ?GG<0yG_vEA-&IWy{eU)a8}WmNlDlNji-)rr%4P$q3A><`c$?&^@(0o5U-
+zlm^oaJ5YF)l*XqdMCyA~pxtp))cfAece&mE767UvDO&)2i};3}7L==}LVLQ!{Q<h{
+ztSP-2p)ZdxLcj4$aE1)mD9Q>R!fnRCCzs;n<;a%Yp^<2C_D53@Q3tI;rq!P{-YQzO
+z-BCT^=vuOkIvja|uqmmCQn@7xC7b#y0-pP3K<zhh>@}Ey=VbX?nhX3~kzWHXsnEuK
+ztjTohSvO=nE|E6qfSr(OeeF^JzmG*D@SajPJB(kCO7Dp8As`=V3f?GUO)2g%7wa|g
+zX(`=N@3g;aI%G~br|iAIYhP1wTK?k`SC7(2vo}akVAiZIsEQVtAF{uci--^Nkd?vj
+z$@_yPk>X4!pNb(7q-)_A(Sy%Yk8@7yJzMBQg6nUpA|&qmrEypT0xjK6$wL7xMC^Gw
+zt|wi-zd;du0^}Iy{kqMxK<k>qQ5FK~;GBjtD2@1lZ+s$dch+peNoTOSWpOaU<J)VG
+zL@2Am)O8%4;prW)SHnhxu1EZ<Y;eG!?`JBez%#dC5uj@3?-~5s=SUH3VP*^^ZPrn*
+zxbO%u5p`w}IPYa=GmERRheqi4IkCaSV8eL!hkYtAUXWEyd<Nb;mcp#1-H%Y|>Sygq
+z&cg^*YiZ5eG5exEBZ9(<gb3Ee13K08U?$iJ*^|Q%XUUp52>$5?f3ZYkkgD;(vl&S6
+zQ>kJm`G8H<rAItE$`*qIRpVZu|7lMbEn|}61=0Y#=;Oulm{g>7AZ7aVz9{!H-s))u
+zpW{1TRhfQt5d@_O?i><4t!H=~Gv9y-x9ENdITen6e~O|+64i+jr_4oaDB4(hdj+pr
+zg!tqH7DkrNu~&jH*f8RlBla~nh})I&)2KOhoTb)EY`QUOc);Yf@6ESk)X9&Co{kJ%
+zzv#TXh93DyH9ElebZ^^At)0QQpb$k8Uz<nqVJP$Ww;7whcWrD$6%nMwV)25n@GT}^
+zhIr|4i1{c`wFr#h$Ua2dCyaHoGh^X~CDaJjNA73mva}d^&dO#3p-fE{%#GU;0ipJV
+z=*uHHF^B=Gnr8aCFMZFjzN1|g;83<vk<x>lYSo%JGnsDKN2@^@vek7c!NbVoB{@Yb
+z;)feW&b`Hb4KXC>fu0a`&?B4+@VAUqY2bI=&HHT#w}55xTIwDsUQyg0JZl)S3OiA^
+zEBgI2>Qv2+9!CVPa*e?K%i0SIz&q6DE~oKpTKLFBK$bw(y3bvvji=wLT#B_Ovm?Ux
+zGZk7#QYH_6LfGuMCGOuGap*-;*j*^JMN`|p*oQ`X_Phra_^0T(I#`n#tHmQetnpfS
+zRt=g;^N+kGt~>xC7Rl77Yqpt0;u_7mtFa93GE0*(<?QRr8!~X@N(7ve^NSr0RPwN`
+zmtvCJ!F_g#7l+>6mlny?NbtEWHBmEuG5o~xLDkXf7palgVAa`{FGYT>Bn>?_tXEKs
+z)3Kh+A<mWgod}<}wp$M)_DIIeH28A>A|p7I#it1@U0nZSEIi=Mz~#4Y<a}&m3RD-y
+zKz<5aEo?_Cka|yN9UX#F*^*Wk<_aZKH$K;Z$R>&Sp1j$Gwx5D~;d#NuPfX65LTfE{
+zlc1@L{eM8&0Pju0$6}OK3f~!{$;xZpsI7JK*)=C7#;*Qpq5#Q`@sHYGRb^MpLMi*e
+ztAq0YkmJUt@;5_Jh}@!9onYnf+qfizuG;?4_o$#hzEXU<tRGK(e-MZ?C7Kg=*k9*g
+zCnoI3>ZRbVz2x%KIIs!Y+VM7v_fVh7+om-|J8#^bq6m;q^n-1*{BKsu7ol|c)3);U
+z+QYZHFmnNQTlN_{Av2><QHd;^9U!<DeQ5~at__iAWbryIuej^>Yv*u(XP5&+4!y6L
+z4LP;j81E#HmT2p{oEP2#9I0khK|?_|{7$4wHriP-pzz5iGV)zSb$sP;&wI~M$+F5-
+z>uV*sJ72B)lMN|M$lV|0sqCQM&=p}NRk}9rGfQ_xsrG0W2W!0VImtCD24Y}aGvW5t
+z%sfKesjT_t`a$ZBzTLa~gh&PJnHI^lkf_{%%@qyun_dMOn(q%J9LOYU_nKeN2nY9a
+zN#9WCYruGFmT+_H?&G3_Ktw)g<e@i4f%&(~p5~2L%_9oPE2`|*X!*##$Jtdm#UGom
+zAQg;tKe<WKfEekH#(<G+yPEcc+WeF26j@FACE{_ulW-Qmk?CBkOmLM6aTDnX<IJ37
+zJoe&;L@H|>2p-<^qKe^h#>F|k?RLknwF#mMG_t1Ih}>}ztBAcw<z{H>U<(qecl**2
+z{w7uX?PSd5@U|&zxAsB^f3dJ=DcIq9>UE8uZy)`r^sqc5PZt&KG%UKl)TBcxY@kIQ
+zH7A7Ix6Re>wSq{9<lk#sZs1=e(2XS`c?mP#sm}zsFRPF}!=|)X3>tZ;4?0AP2cx$4
+z<?L1nk&VH|SQ$$QiTKyvkjqPm4Kb~G0-*zULhkcMoog0hqs}i5yR%nIvd@k70JKP2
+z{$_`076gEtRa??HeM=UNLS91ZuF1v%C>}Ht9JfJX$9I%XAY4Y%7v^#Ak+y5cAKNbM
+znrM~G_4b9vlJQm<-~7zMeOcE!k<L9kr7Qp%k}b^TT@#3*@dhkH=|SDJ>!)y#V0Qbq
+zJ3{3d5*(`mtp%hT8Zm}!CL$5D8cSS-`AONuWdum0yEKzhKA?IISTL^AmREp?Zrg2`
+zHAq`cKtiG;gf^&-JRets*z2iIM}88q%?~?^t`p+Rw1LQ@o3Ryab>gkcKjFCeFSD&%
+z=M9R1SD0(KKl&=!Q#CBGz5kg_eRynIkgF{TDO*(0m?MTRc!YqSMCh}@EA8}^-h>y)
+z^LN)HN0N^4{7j#kyrS_YXk+^dMcs(~(Dl81uZ9<MvmCN8jH&5DxIz7GZ)r;$Fby6<
+zdV)~7*L5L#Hv*tEl~*|(NL&OFE#e@W<lB&m!YZ(_YPWpOuRHOt<7P6gsrN9P(SV&~
+zE~AL7`w9}AJKA^Hbf~Hp*mJ1kT^EyvP#j=$-fmaRfc8gj<m@DNBh9iY7&Ty{>gAKJ
+z3pf_Se+PyX%^6fwKH0hkKPdF!u^wTXw9t|sSQQTnCes5mREl>I%V4+mN2MU9!BIQh
+zgM*sK4@o2$St#*a2;%&6H8C{GeFdo_7l=k%?-!=vTtSw2P{~lLb7Zr`j2Hy8q*&kq
+z!)Ce*H@GQ@$fg*fwy#pOvD<-sn%Iq_A^d9-U2^TjRmEw+J~HL4H7yA#<9o&+RZ6gD
+zz*hUhwkgJ2F^TdSWckzBA&PdzD?YShkiDaJsbm*ue}wR0h|hCQ=ed!QHCyXkO3WxW
+zP}SXnpj^bsb+nq25>~cIY4_^-Si4B+HxP~vNZ=#B8pS3VY4_3)V%}wmhsSk8SnTb$
+zY4>D(fS9@zQW?Rz(NRWcEPb-*VEX(;C=k~+mKq6c&gS1UUpXMIxs=ZWCO;q%kv4;m
+zr-7n-=2MaMS>p2CVk*Lw8H<-XH;7Mg-;63Ft<Z-EVJm*w)sHT^G2`sbF707L)^u4-
+zNiSW4fB~gG8`DQIo$dW@j`O-DK{61^YPen2S?GvIc%=z}Zc!IxO~?Cob;COm6IQyl
+zwxkdJ{vc1gi<Td#?&jFzxETxu0)h3NTTO^sQ=%zofe>4;l?LV@uGNkT4NjegZQH<O
+zng$aaIK2gk@!>%K5JJ$ga*imc@TKMU+?cC9%QBbip8n~QKQpx|-I1ZH32Iz8m@K(C
+z8go;D%w|9f%Ri956oDs-k)Z^ggQ4MVfm1rO8;98;-6d1>lEn?f*Ik+)@h?t$p{N@G
+zo&`?tibS8vxXKhVMmo*_;7*Y-b=v0cfW#|425jp0T`rtaE&i<Ey+$)MnRX+d$*n8-
+z+<~ZDUD|iOhThh)@yz!9pw)nj(Uo#}e>4<^QOpq1hILCjzL(?;9Sq*zK(rX5=TMBo
+ztY8Fm@m3Qw-*RI5B-MrdF&!9Td93<f<9^#WH0WL%>6vC~{H#ZY*U<58Sy67&X;sr8
+zHrZ&Cq<LNQ!uGQ3THN-&1Eno<?(GP<T5QKEr0D){)7fD$Yb@?ogTv5b2*3*Ezw0RS
+z0}yaTl(XE0e7Z^+R|VSU6+*Yrm182$5kmgb9SmC0tCBZN7vUcf0K3wk)=}E^+{xe;
+zp^JWhuHaf!`2U*j`G<!(N4?yc`-_407Z36YgxveZ7yFOb@7d}WBli6j`1fmuxc}wm
+z{l_cd8%VWSTs_77C-3_5gU71}b<(24t)tt1`KW&k2Rv2%%e(AA_=#n492J)Zac2cn
+zSpgY1sStlrJ1amiPv}s#Ifk0~Pj2`5`jshDPW{S%&Rvl+s?wjomg7pwOlm6oAFINL
+z|Ktf^3wq_rr@Q-b4J9*m?wVgz+JD^VFF!2&rl^10*3C)$x7IMv{`A^J59*&h80q=G
+zqMYRaUv2zncf2!l-Y<sNHsjY=FNrXorC$y1orvV+w)cg;7zF!&E)iQyQQ@+vwCFGY
+zYLv+vhWIfzPg|9!q>O&e_VJr}y(fZ~fR<nG_a8A?cyn!GmiLO6&WuVlh=l>R{FD2B
+zN-cb_ZL6Y4QMzjRx8qzs075_EI%bOh|2KR}UVCM+_i)j*grmiS#-^E{y@*pJAQ+X`
+zUGe}@xxQDDEHooEnXrG3cel@0G8okIXA*yy4M)18nHlCX!*Zfb1U7EN8O-@aQ%?dn
+zjGQ~;RaJoZ2^28JS@fN_(DNYJ)CoBm1O0{`h?b(SQpWa;^uN}zZ4S78hw2*nU>QT?
+z1{3imWz<B;3^0EC#KNLuImnR)PeO=Q-}QXRXwtYm)ibdLr$Gq2q05SFH|__)tMAm~
+z<H_wOf(zD(+~wF23a|-MXNr=z)^9jE)hI1^3Ty<s3TPmH?yBi56@0ls7f^-%3*QxB
+z2?rLk9l1LktRI&I-5cgm3qgP0)>vYlWSwf-z%nE`Aje@wD9}ReMnH3V5O%q}0mis(
+zwQ&(m_7?8lVgZJt1asz=vrU|)p~M|$P{WepvsS}d<Sf2GJhzB(JVXgmj_-&Eo@$;X
+z->%rkjk1FuXR6koj4E6v-s)OaGgtMKlNKdJKDns(*=V<b@n3h))&Yog$7*QrbN%E@
+zZ&7d81L<%#27#EOZ#!K?aa(XpzA@WmhT1E7j)_gcail=Nw7)y1{iOE8WH%;aA_RgG
+zEeJWn=7uecnu9g!jg~bJ$cS}$Z=nZrCtg)Gw8fGUje6?)rPxZ6Fo?5`pb4<lv5SdK
+zy+2v&C(|||hWAPMUL+WTK&<rVDXo<Qct=`dH-XkH96VS^%O_HfT9ElDYl&w-^{?#I
+zp+lbUY`vzl1<hZqDbmFTg1#UT&>Oy1oiklt5}+?f<}NL#{B}37$ZupK+4e)l6hr6=
+zRjtOYt^0AYUB!$nauKEYLY7zQU?d}8koaL=GyKk!BaM}J0d3f*w6^7`a{RO>M7LC9
+z){-n&e$-h~N0&sq%CdOb=ZY4#{U3YO24iQLb;j@vH)LY^EnO%R+7b14(&GAeXmbbJ
+zTz1X*w@6!B@`oA$Kl9P{ko|wz;(D^Ym!j!wKPho8KnTD*%vl-VqD};cu-CiwxAT^N
+zcCUxHYu20##0)d>X^_i!eN3At0MCB4yQ2)XW?n8htzpN?^M?@c65Y(~7z}XaaJLxf
+zD%^0AR#LD@AIbbs3^q!eA)@wFLzy{L+bJFk7;l_MgvSTOdC7lqXdPdJt>RIwsmC7F
+zd$D{5{!h;s!TN(cV1a1LC;7o`XGVGbu~rSrHA(Z_5I^b%>EMKMkyz*B74fn<+&V2a
+zlc)9Rl5dxRdcN#%%U7?_{kg#b^CSI}mQ568a5CX!Q%6N`5`x6EEmOYV5Ml9LL(zwy
+z{=)GeX#oEu>ixuLD(d?7SCXAWzX~324DNDDG>dCA^ryjH^@v~Z-7!zLOWEZTK@o~v
+zO=}!I<-<YMJxGN|&T|BXIu|gW^34w1$VE<*WT2(5Gn?;7HkKN`dd-%WkPRXP9eB^Z
+zKut7N46dh-Ll9y|654Qe<1#In2gk^Nt+gydmj+q1D&)QQxlyQb3F~zULfOS-)Foy9
+zxte=n)GE?ne6OD=e>RUNO!NfMm$PNu7>Y8<WJC1Iup8W$W9g2xsIQU9CD$?MANx+U
+zSJL@s)*R+l>Ej#;5bybXlyuBvT!zj^1!v862n@i(2oo;|@$|Vvd;voRt_3jO3AQgS
+zzIPK5sILSevyS7}b8uC=FI&?P?`8`!UYme3lK#$Ds6vz|uzdjE9HhNWqvdExUwT#`
+z4>Frm>)XL<fAs-RHerV%KWha{XRwV6g^RD1sPv>~u3APFVxQWH%v!12Ba!V4wk&3z
+zBCP{ZtO9^-L|kXmwh%3DN=l$Mt4{k=PjH)M6O6q44`CGOaP%!@weN@1LO;8mx8{Rm
+zD5fJsH;rwIrn2LrJ!MX2epr_RJCf+t$2Uh3G$lxL*t$_6L}8Hhb{7`g^ZcTq1KNHK
+z9hnWyf$vuQ3m-LRA=|a=@A@}2SYSW_-Vtj_+?0qsx8D2B;z_feN?Hnr$VT?#)3iJU
+zehJVuP^`B$!slz-$SkVbd2OPw4qWEPT&rd6;a{Jz3$Sefdl*+@SNC?rHkuag1!Sa_
+zl;nS6-t1t+dvdr#&kPNY^$=m2gC23_RTbQGu@T>NY59x_5fydIWjGFh?FiC_(ak71
+zqiDO%bG^_be%tLAQ;E3M8V_auQ1(t;<=*bzhOR|SO2L-+6A$}ulc-Si`zM06U$M4m
+z4ov{f5wxmqPQbiDR>Jk8fbguq?8s@c1N{*?P>Y!JM<q2%9`Oi<`}v8x?~Z-MG9Jpj
+zaBYflEtg|aD%}D^$MhiaDcRLU)!~L-IGSIqsp`_8G@F97swGXX`0IGYwDo*hg(I8+
+zt4K$7^s(9u)^PXWBI$32={P^Ih5(*|l39}a;hu2n+O%+*UhVx*W}N$>XaHx1Xl+m6
+zrh+4ifya^SR224?*067VySQ(-T*P2?Zln$fw7Y0G@?Phk2p*iI8KH<4)qW<|oLV&s
+z7tXok5psAQe9{iJ+Y@~JqJfKuiTiLt%}yom0nfEwWlda^Y2nf94O!d7n`fnqk~}j3
+zQP9VyH->YxgT|Bp?!&e+vUu={{)K0H1O1)Gxj0CL5T4Ot)*M0=+DXKFfxsL1*zNX$
+zL~Nt#uLW#G)BG2P=>VC7Wq{z)@_XjT9`WMPq$&~_?U_ZUw9(z9NNLg|y?bv&DfT+-
+z(j-?=jKm#%ZL{mz>SGdQ?iC(9J2_2G4?%{GAJGFPruEuW{eccCis;?xFjCFD17AKw
+zAil|&ryaV&w}G8LS0qBGAtL;6&rJnZ{1%6wi_ZnFROk2%gc1jkmok)mE(jZo@B>qf
+ze8UEx|NKNi6*4!-uaEhxAMgcF3ZJ?r8T|7t;b;>w*}g=D(~cC}h`EfsV1n@m{5vot
+zdH8h>ugWr`PDCM%C!$NL&I}Wu6%IQsSGHgg^My0<XmN;q`P7l<@z=o?Yh2%xKtp>U
+z{fKCZfh2dWAgH#GKY>icyHt9@84vkZS7c*cuo^LfCUKYRpOkETCj06n>q92*d{S2S
+zYdy2|-Mbn!qRD8)-ZwNUCB$k&XA{l^`L0zyb^=-(rp)}QS}Gf@-8-C`|CrqDURem+
+zs%way_+v8Cp;#gi*INwYaKGqsWn(OfF`0?M6F-n&_uNDjz<*($CK5pk!Gj4QU(Z7(
+zz9l%)Ttdq0VEDDDXsE~gfVQt}5CdQBlp$2tn}i$r+1&#z+xO3*6ELEikx=#F_R+G=
+z4Kyp09*7x!Gyx`DpJyEBdk)jPCvbuP+D`o|kJ4j~gFHJNw^Og@wW6aSON2406Xl4f
+zU1ex9<gcpMP5|_01UQSRoktjSgnHG>-fVL~p+~NY3pIQ5ry~7Xu6M`QJVwHxeN2}o
+zuC%-$BeE|&QW4v?v>E+&6uNo)d<})+qNbmU;!~*RT5A~stH95ltjLbt8CZEGrG0>R
+z<hF798Avyw7*KNkjGfNUwE_HGWp9l)m$j#fzS?W*cV>u>d6q*=(}@Q%{Vfabi!~Vc
+ztiI)9nW8q`7fV4-J%f2rYV1aa#xpgbVgTU^LZSwR#1|A!6>h<It52U9;F2%RJ}VsC
+zwiTP&@6XR&!eo~Y)V5`01^;5MmYPV8JkmZ&{%|nB&RC56Mo%5bwNkpbt67>SZNxuu
+z+R?{jUiaj7oc3+d^+zgbJY-mZ=M_Z6XUfhbv4li~X-2qgB<Ga*LW81jqdC5ypE{25
+z2nZA!Rx8`jM1LtkhVq|kB*<Qd5S4y>x`r-$;;B4lJxJ7?ShKye#0F8gio|n%&wVp?
+z?D*XFLo^~&hplbJ)Kzdq5mH}Z#Go@#71A-0?wCzUvf#+l<v6->;Hro{^uk<=5N?#)
+z%H{gKXJ@X={~@AO(Ph4p!r8`yk!puX7C#o6<0r<=B`Wy_FfpeXC{>&eG)5E3c6AFF
+zs#(_$qs~GEt=j}KH>XU~s6>KQs^Hz7Q27GYiSB_nXTR)TgoKF0J<;^40#O>gs!_5-
+z^uUAgYT01vXf#4IpTZzwUslW(oz&&pTSbH7f)iasV7^5K#}Lq$wegi2!RUE;4o(94
+zLL_T4%hk~y&$njYRolgXYO!YNo#0IC7U0j-u4A(DN>^(DV!NPMft-di8q3PrYDf+i
+zv%k?hs5e}#7^&D9FB-Tq+@HS3IxqgYfhdGDNI5tr!ai-g1|nn3<p@#l&!4id$v33Q
+zT-FQbJ-g&R`Pd%;eTbM12?rJG^2OT2DaesRv$lyyJ@X-WE>C}5aS^`rYw$j{QY%P#
+zJay`k{8*|J*U79!guhcs7>x@#W69L?aY^q?Qa^Qf<zPYjIP~}6;2RxWSr_Iw;w7Qp
+zoJhYP1UBn!g_=8(TGtObEqvLJ`8;j?jWGmLq_T&?#ZOq_9Cn{PZzvQGB&PJc1kK4-
+zjCvzaRgu-?<`Lg-_ah9yBUqKepI+A-IcgzGNS6_nmC3M5leaXT(IRl}vv19l)1uk+
+zZi?QJXy$E$9m`*7S`9F<e~SCb9MAaC+$j*5{h&G>lRxxAOUUROH%h;jH@#~Vqa1gy
+z)&3KmqY2<oWHS$(>s@mP`}5$ev=>uS)Te1C6lAx40tIS_Du4KJXC(NZVX=fL^1Pe%
+z8tsMM-AI(pkj@t<u%V?b{+5>g-<li1nvAOH_W!m#YpHt2k9ony5{;+t80As_gNS(5
+zc!~r$hpKziJq`^rOokm2UD#Ez77uE*Tb;dyrAyIJcP}m1*W?MdAq;<)j$rWoU)J6|
+ztf@O+`+oOyTc*~H(?RQlB|5F0rh-LF>V~j5Y-=r}(jeuK!5YvCWW!hl16hVZ*cBCz
+zFfAembEr}X5DW?;hXtgFN+BUB1cX2i92!CrNQ404%=3-5-P4)9-~GJr_53wl*EHs^
+zlHdCM?(cnnZZeThAC=Lv)Jq#x5#7Yxe13BpdJ><X-rF;NKalKK#o@l*xNZ~)^##B0
+zohiUHC|Tf&*wkZ*$5p(FHpJdO1$K?MO_tlKaHItzIBy=&^XIy~a;0QAZQyHhaO0my
+zYrVvkxgG50ozPEJ`aI8=Bm6@%+=^*@Q)YG)+$gn%>8G&hM8(0U_!Rx-&^+#H)f7xN
+zE{$ii^&jlRx1x;n@J1sGMg$Qy>Cvp^6ZFl#tf`1SQ4`;wo8q-H_3{6sDM9Kv`$@`Y
+z9vBMKjHKPvMVE;4Tl9{iy<BV8HMp$TKK6G0dfCOxO&v4#KB`-cNS{%$-5RG{@VMD-
+zM?uOl&w+tS^Y@{s@Phh8kgkro;}Zs(RC$E{@@^R^#BO+Ao1fyHo@Y9JNxBW(`Ww_7
+ziCzAjm{SMl4a^fC*QJIZewpyx%IwXS9zU;)Zz{77AoM(3*gIBKZcL0>59F1cs;){~
+z$`;yL)^3GlX<ctfeOLWTX>Z4SK`|vs^uxt&J7pF6b>`3c(UEJg25OqD@<3q)y@aDs
+z>IqhN0guqpT#jXSc}M2Qw@y(K$kgK85YRg9(W1ie`JTX>!#W{5x@oE;$**}L(fe4o
+zHux;1(t}&x4#7JxufI!)gC99-r*oKg{y@%Vei)CqueHKsV}zEG<}V22=CXN`*HS^d
+zk6=i>D8VsN3m-DNH-xz_m?Q4xPE=xocK#e<dCb4c4F4gDFcTP(>Oil{f;ZKq@PHXW
+zJ!^D(hCaOv&<TEWyOA0F0W|UU!f*g?cv~twWN5_bpGHF}WV983)9<dAyx&TVFB2>!
+zoF}F_t8k0mYO_>0xMCKO&OcLoM8&m}x6st+sZgwkdc7`_OOeLff(vfjlNS{u<T`-P
+ztey3uY9KXEP{L;LIx<5CM8pR(ltenXJ#u)=aN3ie6XcL&n!B8+fW;amgqa@|HX%-W
+zr15531L+;>=O635H|ueq7)<VtJp$1$0=$AEsu7|dByuE&aFYC4z17to&ND3tB0W)K
+zn6tp`hAyp)9GOMV81k_}?%)$&LZOVB<;TBhEwj4yg~_F%8h5p*eNxme92@<u7W|HW
+z*mT&(2KIHsv`Qr6PZU{Bk<evFktzA1i>0mM!^W5FMkDZTyA9i-niEue?!089t#2H&
+z#HYpbB3pBa@!&>uE!4P;R+47NKL95_DTc@&gL6Ghjgy(~&xZ|=^O2ZEt{FyDdztN}
+z*yb)wCBdZm|KI4qwFRTHU%0S`*57F{Mytn4T{4nXJ3A@QWJ+Rt;S&U@%}Vx&$X+NY
+zMe6HzXo&=CJwggbM&y6GHP!8!<1PPw(7lEb-@Yy4oq>`2_66_OsqRWF*4r=|{@_*Y
+zQbIO^<;|~un6e?Qbse2yzd^Ny(Ym?49h_8jF5-znntY7RZB{Z6MCb@{UHyK#+@uPg
+zKTwz-v%z)iZkr3$IBofEqQ8eAPUY)Tj^*p${e*E=A9`2oi<fLqk86KpWlJSLV-^{<
+zKRd`>&-78RF(*UfIztlihB>2R9?bO)^jb2^>sN2qf{!Wrc=*iqCoti0#ac)eG`>{u
+zgs3QO90duox3Jipm%{so_OkX12cA=P?LdbkZzPdwjc6uRB-;F@rdKWn@mD97rY!>I
+zYJz$H3;%V-A5aevO$JwwwhfAc2F;y4^CTn`gVl$03jHfLk0FhTNQIR{#vtLtNb?5<
+zZY}UO+#9I}1A$taFl*+tV<H8io{O9U_5WBlAZiHJYkPzH!z|fX6euA=W+3;eBXn-7
+zA+=gO#M1Wba(9T$1u<o~pj<AO!M03`v~5H=Xj+om`j#24-;r%A){>(uxuLe;rmpjQ
+zl62@F;YYk0_&DPMeU*6J-)L0EoVV;*_Cfn5Vj1?;pw1M=Nyc!aPgU~~$sSm;P0d|=
+z?~&~e%a4uzMoy0`=2mKEWZaf#?%rZ?-YN;+c*b_T_&-Ed$$BsplQ9rdF;zA77v1>h
+zKZfwTfHiShx!iI?5}=N`M(zN2K1pt9&+v81|3?XYZbG`%C4;!s(&wmZQR8+>V4rgP
+zW(aI!@12s8t-lNpe);2MtZ99=aeZ(wp0etyGQpG_84G)+I+4?*lq~Sy(qy5Z(dcMA
+z2e(9`d#PKHN4QCaVH!!6{o`C=?qlFqUCH?E(AIrkPCEPH{&K%;nMf}2sUBZ{0JPu~
+zM>)+qT{a0x8)^7mIi=e*R8W|deRxKBjv*6YmB~;4{H}k|z4?3L<@IcJaOK0ibBHDD
+zcFo8y7y1<W{*#uSF&AvRKpd@#e7rxak&AO>mffja7{5JrVDXcsS=$?bFSCm;&SxHP
+z(f-lo8Wa~axblb5<l&{hoL#L;?qJOuRC|PyJ9?;_^2q%shik;YP~?6d11x=VV!63<
+zIrtsp^q+K5`z9cLqrGK>wR{o#jXe0S6UKQ3ah(0Fl}i$2ly#a|^k7EO_F;r<(awZr
+zN9ru*fB3wH^i!6tF7sLc&&r<v09RpE0j9x~Ea!d9w@57K{IG6Udro`%@>+FzShgQk
+zS9b+suW(+{^o*r|b7HliG-j9FYz~}=15x>x&+Ek>{EnyMp+CpvRoq9C7V}6GyLVpG
+z-co>!=dSr8e=Y$$w>BYlU*7ZFrrq|V)65)6H-BeE=@5CmPRbz=C*fxK^IQLAbhC7#
+z3BI@N-p3P%>bvM^`veNW)p?gt4uGZkv0I1^ET*^Q%D8M2y^$;x>5bO42m-OYG>6nq
+zJw{JUmG0ul9r(x30jtxk&(7n=O$!6hn_MYzNYiaaFgu&B!;YOq&EGld4}@$vcD_pC
+zLWa{JBrND9C%PdA8_GW6AM97nP5+12nYQT;AiM^*{!^v@@4$~9>rLGERAN5($vn>6
+zH}BRHyBX^{lvd(n+x3Q32~@wGl2U8v=mv8zAw>}ONS462#qc9X-6j&m^)EI4-A4-<
+ziJP-qU82hUH<bAQHab#z2=1QW8dJ>q^BW^PVQ%0eAnd*K5>T-wiP)x@-82X0bmh7#
+zb=~KnW`SuQi`LRUUUH=Pr%LY-Z`aGn;FLxa`+xa8{``kl{uIVM@+95*_tgnY$N$<@
+zy1j9#@``<Ue2L4F*7Fuuc%y3l-yn5<dgMp;rRATHjKB7`#g_P*)?aE5AsWBUZSyja
+zx$WYcX4Lza>-qB^z$|oVjXJ;3lKbDVc#MNG+JYmQ{wU#rUKe(^g%u!4WZ1zoDRo^}
+zRn_{C@<r|B7BxW4vT9AT#*G+tV${v7$-gDL{bWAQywEr?%N}Wv^sKm}T(p<>y-Y@?
+z<5#aPO)rY)endFD2>|-Mjj9bI-;HJ$L2iOMq;?T>L$xn9kJY0Swf#}>Brx3KeW#Wi
+z(66~)F~Xj}YR%k)*-EGKv_siA%jY%`#u#3(yB4(%^DH9=Y;VjNY~q{7#geqg`}GPH
+zLyw@#@4@OQzL6XC?>!d_rf`T7KgN@*{vw0(7>thujMx$BBEghOUL22J7R|n`WXMLC
+zF~oTIfgCZA(~4qh8x#=I2DTUd5np}A51B@l2BEbi23(OomzyM=<Yd}LRSSEwrR-=_
+zXGfinTt)nBg8BQD*LTa<GE}CCitDBn@2!!zz)3)@YNsFT<+etm0eNq#?$pCJwqA8`
+zb-#$$GlAI(MIO%MwSJB6K9+=f>LZTHYnl7Z5msT1a%6na@kNBct0R3a>MuYCZCKS`
+z@CQZ7LFg{I5*&`cGIA}AeAb5Et*J*K|CHODpuZv&dcdc{Ib#_+nuE||_gyE>T<14B
+zEU%*zZs<Apa_@MjIY6?%7(V`2<`SI8&C^Pl`sJ$qEZ@(oljU^n`zd*hO+MP@NJzv?
+zhMl*9-&h8)w>N(pXniRBpAkU(caWXdGS1=_P!pGw+xtr4qt}hKy6moLQGe;1mjowA
+z`(TTk05L0R$oP-s@N_-GBu!<Td1ha?4C*E;zTk7)lJFU|@q^et+7`W&FLtndW7v6S
+zx3f=%04t0EYaTnlb3VbN4-)EmZ*~*G4!MJsLFp!{2}mvc59(!zeukAEN@s;9wkn<l
+z+MiJwtRtlhoLH;Q<9?seV@DrfIaB8@WL9RPW11{KyJZErA&h;9N~hSiw|nX&di*ku
+zjzsXZ745F?DPFNrOWb!?-b{M#HOep5<ikjen5X01tK>Rr^GbZ}UcR&X*t^U;yCePH
+zz{HR9jpKv#y7}#=E8Oo@@G>?l)oKi_cW;@;-!)4u+ZGf0Qmlup>&4^7gBh3bavk=V
+zRw6bzPH)5$du}~>4h|CY*U`yQaR<qM7nML<Aw7wK<O3U2K96nyxX6N9taGxDW@@*^
+z%OK`+`{_(xZ;yAAq6#9;#GI<*y16#J6Mcb8BcyMt&Xga(oHTI`)ov_rdb(_Fo+19M
+zvn=R$@<Chq_Y3iw9tQ7r|GmQPzR2a0K(ZwHYn?~M<^I>i4m0VG*pS_BU3W`1zrUWE
+zLK7+GSuRU;J1WzSC;Tk&WTlcF!_`lt50OOrGkwIe)Fq7Gn&C^XHP<vVtt;J_rK{sL
+zIHG`-9@4bn*q6lEjf7|O)9AZe>P)_mWo&n>Y4x{+Z*vW!grJzy<Z~w84+d<VrRN+|
+z^n26{0s9~tq}&0Kq{ogGKTPr8V_QlfeU&n=j=p>F#t^4@haT@m+(v(DZR4GMsMa=a
+z&Di;tYG^^4Mld#Ydr`OO1q>S_=$S=4R1*0S9J)6pXZ?g1f_r?(W<&IiFkDes^rGf5
+zg_;pBC-Ibalp%5FO#@{}M#=7VUOVbhX{#7@R6A<-G&|aWJfc6sWf-Z{V3R7dM6^&o
+zdkW@fM<P@5=sh%N8|7}zG^KXiHi=sfb$egiY>c<BjS~k16?Bju0=`@e^0532Q3e1$
+zx2x!7H2Qku2~DR5c;%U`i~MiuyDN#-?gk-^^|dTQ8VZU*;PQrQxo_2`-~v<Ro{7-I
+z#XIHmq>At9=I<=K_NMeut9vJsl7TttHr(jem+oLxou=yV=tFArF$9Ft@~+<!8r;(J
+z?;N7cL`=l+3D&bVuRrnvDC*q9FIzcm?VBd5X6oXUmz%e~RITd#vhnna<GmJwcj8uf
+zPdsYpaq_KHu1MnLYh^U0#`0hr&|VHkM6^@Q)tx4<L7WAQS-ZB$`VB7_sGLpOnnLr|
+z-8#1*ojqq#k*FtC3sNmt)Jxkj?L>$Ysa<ktRgdG7Y@zjbdZAsEi0$2Z$N|tQp5n_2
+z+B^@kdgHV7sfMWWPsz+M9_=ZaS)YimSwwHqLq-BSe6ci;bR3rw=5ZA;afLDTS)yjY
+zI!ApVq=ZI^ip%Eiu#TH$6nRWH`kfRjkrm0=@2(bYZ*1T3-q(zA!a>N;ox!%shtoX&
+z;%|A)*CE~fX)^lmSdymmy5=0E`X&w}nMUP!^6li5guEh_r+^x2!yD7*(%-Gc(?_Uq
+z@T}h35p<84jqO}^5+zsR4um{Y&y`kQ$|pBxd+!`oRoRKNmXEkXO<trOcQzRaDe;d#
+z@ufa<ne_s4<c7&3Go_VmI8i{3$Ltp}g6H>?A7Z)!9xa)tGt0IBwRT6F&#)}bmwb0G
+zN1yB<|D$UKkEozMbCF#_(qnrADU5`mr@E@!Qx$icw2tE-gPMP=vb=BQ$mY4pW{D4N
+ziM_p6zu#LQ#+FtzRf%T*8Rd+yVtbga37cjupHpoiN+H}RuL2RuFm8#yV0^dZUL{P$
+z9k_%j_Bm4wZ9D{65|X|)!cFx#YuB8kyF9{>#LrBx5f(=6Q(vr7%xjk39*-vGccfB=
+zN#=<$u*s0fKU}T?!J)`Wvzz4)mesE&5~D4D8lyq7KA6T&^Lx`&VR0Ky#Rx+QU?Oju
+zg{iUXF#(nNADg(yr`*t+DXPeGrY?&QxuEdoHlG&moy58m=+kYk0q@=HB@oW~Q3Z{;
+z3Tuz;tIl~@{ZCXR^ao#49?kN=XN?UUlNU`0_t|0&@Y*<7<S15EvYoG7OV@nq?TG~y
+zlWQGku8^qnVeX@K`4ljj4^c*ZYcs35ywJvw+FTTED(InIC;y-yA7oSn1whD}ztLxJ
+zGYLiUrfCsB#)HzxmmoV$u^LKwW7^iHH{{fJGO0<$q)+DIv_spZR;xLm*9>$JYLJXK
+zCRtoe6nMR(0sVm(6%$#INt`Jk1v4Ka3$`>&&nX}4xGad$^V=hJ{uzmHyL}fCH<>kB
+zDZLx?3kS(QB@!9my;@=k>*yB!KBE{*%t<v%Nfo1)V8D-9Mm{i_B4VNnx|9>cQzUVF
+zea0;Cq7!C(z50e&dg4{uISJadULR9GRf6&eblTF7RRtTlzQLC7NYoq&EjvB-+Gy>t
+zLL$=zrZ*mZ86yWHSifiDOyoVe<uHWfhJ3&~0CPO_On>41K)icRQ>Ik#@e%&vf3@ct
+zmvhH8`(fZ$X{qQkU=%aEV9I0JwW1NQ6aAa~Eq^eleSUI{cKd8?CaqVJmXferLF>=v
+zPa56F!b(W9?i_ApN05TJlSP%1Y5P3oR#dz=<M>)^<w}@JmMyz-vnspYNkC8#v+C=Q
+z+aD{^o>M3Aal;-YlszMbh$SJHL2hfx4@7y}m|12tZz8cjJL8-=Ve~1=c!*opo=wFU
+zeRU&=AwcUE8m&}4Y>G;@@08TZa?3%9E4i>NHL-FM$i?Jj8Cq|oMpRZ}jZV+!bzkN^
+zxm^FZz@v>UhmD9bj|_JT?v-4byXlIV`2HpgKw5<a^7xMoai4CB%rQ^$f$n|9<B1>B
+z9DGbhv^8+I+ZQ&+omZp1u>*zX4;Gw#vMBLfSetYBY2gG$83d^Sv~$Nwc^C4?GPw-)
+zpg|+Du=*~)Hk02YLnoe8;geq)3umjU!m8G0(e0Z9ZDp!1l|XTUDR!fc2J2yV>)+8v
+z98U~?6gb0~C=@KDh0o9V?z}D2s7naf!jrm!pEaVhQ%u#DdcbyoBS&W8JPz^$Ya16h
+zl%hdgH)S}mqJM-Qt`3xgN{93`+=qJyygu;ME|P~xO<C59iYiJc8i_A#DBAw{$G)v>
+zewvxnO4ByCF~IqdA1qfo=8*~DgtG21e+p2-w#tLTqk8vx469S`P^ME^L5_g`6fLWo
+zBVHr)(5PFFWzn*79fuY}lWC5;jJ39jaZxJeYWcb<4pKq_#)kH@Jy9u^(Fgusv42C<
+z8CkDetM&z|@(b7zzG*8f_R%`)&omv~;_qV7B>l5UT+XfmVy3PC*i0xmoX@p~TK=u0
+zquW5Er*bx`fLSF7pHJGf?1fRY21<`!#|i97jA9=^LReMh(`!=lbL_cCt|ituJ<o}I
+zo3$yMgtvBQyJ`)Q=P*bp=IK4sPCn#y)ypS+;*&&Rp}TWp)ANB}JXn#;9EPC2i#PbA
+z3*F02W$R(knZx6LVGml|Bn@4pM8soxgZUKPmFa(8mTieuCV3Any7e84>M$#U=gDIY
+z4#A9gfIm;i%Y1B<Q^mbs`qtb;zv16g9D^6Cut=xP-%VKjkZ$J#Ij~aJs(Y#=t;%$7
+zSO1n2?v`bDf$weeH@u#}dP-_gCGB<b8>|4;W3cAX`PuCmziC2W#)KJVU*!!^9r9Ba
+zDAC#u$LH4slVhAF{r)Tpt1K}8MDO!&&MnBJSVsaYGL1jyHn7b9as(&(LD|z0?SFZ9
+z2)c{h5sYda&6F~A!~-CLnsQ$(Q@|vhmu{2BT7C~`nPim8l0IhEs^f#k%g|uN;51t0
+zzS~?RDmg{rTZWGEnX16yI#)|_Ug>?2OiBT_GKb59A@*apy<<X(tNcor7jkFBGIqdp
+z8n?Pu)lny`;O}!7?eX)>9kcjY-4m$A_K9@yQBtE5pQyOJ*?+zPp=vJ5p8MF9)iR$i
+zkzsbHK5(ZgrD2SGw_=tvOn>*iZB6SNoq+KJ0xDr>ahE0el%PUZzTgHv?)*Njx^U`%
+z&<DbpxEe*{<${rfg}1GS$Lz?LtAI5oYfu;fDv1u7^|8hSz`sZ5*#ZwE1w%Y;*a>@5
+zm?&ut?uEQ6oPAXH2Cwueo=&(5EM-$foHK-3SXA`m8a~YBWYZhnwTAi~`jcn;wYb{j
+zzOC{b!62hK0}ZuLC$PHR7y&n+OPSCf4JX(C>H<Md#PL_2oAFS8yiuA+@5d#c+>Kaf
+zj{G;nxQanKW=V>h#A354)rFV)2iO+Bf!D;ZIsh2qa=rBx8VIxIN7!xb3PiOxr+bS1
+zs_dC+LA33gO&9&NtrLer{Xh##X=s;ggfC%Bj@!n|SiLlM{5!C4Z5z0!(52mWgR$f7
+z)+7IlQ3a)pxOPdbF)4ql@A!E+8L&vSlljM~R5NI;9ookxm4Zp8$Z(+nad0Y!Ng%to
+zV|-33VtW&0z(S{k+Sp(Rdy-<*wl?;WNkfv~j2BX=%5JS20b*^~-5U7isv8P@brqIv
+zg+{j=c$|DXq&8r}{O@oTT%D?5-Lo5Cn`IHM63d=+|A<INHyeKQY{QQm)R8cco6uZl
+z$IAwByyC@dBw4#h*H=0Up*6J6uuEbSF0BQxYGhr)^~P*_F~Na~hU|(%+!v|9>xVgp
+zi9f6k{^{z<Uy9|#0sZ$L(_UyI&dA9xo^~t~d;kE&as77@2KT)=b#7X@k^kSKj=ZCn
+zaXV#f{UL32f%2HA#I5g5w(Z-k+N)cVoCOMUUAEwRpNBj2?ISogqXPz%1@mpx$E5Ik
+z=5}9>GFUFEsBN*RG7q;3(|C;%<5X^_H=KWA()o1J${h1S>;MG*nB8>>$im(Ex`q!v
+z^f!f94M<#eL(KtXAMZ-+u($V^QNRlX*{@ORe~e1Cuf6UKtp;AX2_`Z53|IZwf-9M!
+zw6!uenKf#`)B#CDN`eEO;?H{=)Vk5%dO>0~P6GhzI_buc`=>J=p+Rx75#@AYu}`cE
+zc}aTw;~2M{%nX^cyJ;F!vQLSz8^HYQf3YhMFc#*c`W<<`%PV2UQ{52>vO$r%nglz&
+zdy0V`7ep!Kuq=+|VGaYdd19u2D_7JX+&o^;t8B<=_vToVA6k*SRRgH6Ot6q}9&Rfk
+z-r|bq@FZ-h%5miP@zP0lfpNR|=CSO^m(f<glp4h9oh<u<nqw+q6>X1VNGBS|HUF>B
+zBgzr~MfZ*F`G(hYRwAoRluE~xMFHyIn4mPE4@K&Pmdo;ZS?$+4j-k7f;fs2hAhK6c
+zDZ4=J)Dvis2-=O@nZj(c``Ks~zZp%$Jh+j&sha-$W*<J{tQP`UCkSdADpjRqT}c?N
+z7&0R;^SK@s12VlX6-&jBB<rA+gI-;PSpHelGZC&Sz!2BrCIv1jXPb529kA;Z%O$Yj
+zd=8AQ6Ir!?K~FXu)JL+>uS1k`?%f_`fuqzd!4X9%={6qhAU5lfhAV2GL_95()aL=C
+zy}@;_{jr<4C&mw%PRk$&6wMmlCvGPW+rpa7A>*9K$drgnafkovL-j35E-pU=4Wk9n
+zmPuKxyvAHimc*pbr~{w$Sd#Jb9dep|`+>{wZ1vF|&mV83xGOfOT_P;Sny<E`#|}$5
+zw+Bj>9PJR`7WC9q%T=+@^o=1}_y0^ha_nZsb4meo*@Hho1&Ug$(ylX0WA0X^PUd<C
+z*LQ7j4d_s3u^#6g0cAtq_(9Wg>4Z-O1^<kcB%3Z1^NzbqXeVDr;x{3V)q*oPGz*;B
+zbv?Ke8YIujC27U`g5VAcTa}awyNjF@!h`W^@-@+Y9M=l0q_E|*@Z!QwiO1SJusCJI
+z?JDT6=~*OvPqsAUl9}Ne@P%IQq($>jSVRw!s|O6054i`w=s4hij_O)pccbDcwWb2-
+zb0sd-yF&!x7ANF5x~b;4uR;=Q{{AT5Ok?R{*zmxVAP}9uXeEy)mz@|@T(;Z<B?2Cg
+zJ6+)zA5grV530>)_4Ry(<*YX7yfOGP|D%)*+;vt_E(1+$HOp|&UXmIyN-4LQzH_%d
+z3c3y7tNOa2-&vk8W3?B%u0`q2&u5NQ6k4}>xdluNjH$k2&#d5TO-{AU<di0bV~-h@
+zxm?x8VP`Xr5ELh<CEO0W+62L}k9+EdQ89BAiTFJtf<scqZpE@6r)i{4AM|yjb*eN>
+zT}1V(#;v;cth9@rAPQTUK|bH_7!k#Qz$gX<EF0`IKk|5VRdyGBx;OC7NctJ|;w}k0
+z)UR#IB#J2RPx4eFcXsUVYHPS`X4Yk!yc<pY@3@@28f%qrn>aT}6=#zIG6~}>m4Duv
+z!qv=d#B=c%Y>8TJo2~G^h|j=9#dx`$Y|OYGlQU1M$$e8z!uPhV<H>BT>!`X?t>B6}
+zE#KUP(VV$BOxv2Uf*aRlMF7ts<E<X#y$l=XJJFCiN16uzlpVQZ9oy=HX8ab4H1MZ;
+zi7n{Y%S(ivBlkVmeYETzJhJpQ%1Nml`F5n1*85zoPd6{{n-ONDk_%}t$@GwA)Mx=P
+z%dVw&=&Ovrj@59@jBojBT|u+sBJRBw9XB%O+Ed*D&r`iTA<(#&uDDSixA_4p_hV_4
+z!PQmVf<s(TOZcL_T;hUp`<<3J%fMJumSmsra%SOYKg85nrbyb3=)0?sz1Yh7S2MN#
+zIm7+@o?EQ^5&(a%=#_054<@2F;+J!?N3tnPX1cfq<{v})dse=6iN78k?3y(;>RoK1
+z+Z%MD_CwD#Yd&DA{FYqikU_h!JbFpJv}@^K=j2+mzY~Pu4ZIGUP}5_`29c+Sh;Qoh
+zfK(RP@gP`)%n_(Lgkv?Y+CoFQ?ee4f=pV=3U`$?df88jN96fK3TG#@B)mxj{A6A=N
+zbvrkyB%%A7Wh{1nnLd~uQcLD``pR{;S(2?Tj853CT5o_&22NctN`r0z|B!f&TZQmn
+z_MTgizqjHJ96nhd0BBuF3uR8?H)e3$uO~{(d%u9`*_`kAlD^>=fD%FSUe0P&=&jVA
+zKuU}~CmP9Uk$+<)s5)x(?s)F8xr+^~-i=aXpYZ7FEA{%?BV@Vesx|l7mbLWH^9u%)
+zZRNifwC6WeXIZW{7DA{meQj?TZ8Yhm!)#BafOz`jm$4oOoLJ3_vYU{)kO!-CEg#u6
+zi3{z|!yzsAavLup5`#K$I$=Ju@c7@v0DSi?#VkLX7jI-$n6MP>WVWV<^&9O1vz4#T
+zWAbJ-dm7%*hJ7^ySw1slIQB!z&9OSGYUG1W5C<_Gnh`B%1D6;q7{~J`r)}2h6=5<I
+zLbW8~5%Eb^;Roly&_f<GOHWOgMHpPG;N-fugce!wmK7`l3EuvM{2_VMtG2(AV&|gD
+zEP2}H_FxHpokiC!hwcJs6&SQc&NBZTXJRvdi>mfids_cdeHH@DRy=y8EXaeuMK3}h
+z_6ugGxK$|XT`jmkod9S(mB<QkF2gYVKqos-<k9T~4vH%XJvmYD#dSV6b#gg#+xpOC
+z#GF=?lIY8OLoOTS;e++tzwpAd_)5#abyG6Pi?5WRE3bDqUK<^h+XfPCw`Ig_O@w0)
+zFzvib`z2CIC@E!ZnuW7%9PWr*Ei|qEvmaxX|7_VeT`aJnNw&n)X^#IArNM+A(_gu9
+zRa|k_mtHYOE-_b}iVv@6hHqX5ahwR@n)EZhO1{skpt7lE?QD4d;Wda4J`-D^&v8Sc
+zu4=1ai$VTxGuLK6P!lNG-qfNBYW|%Dw}#npxC^C)Gh{t%;6A=yE%Uu#ER)Aq^zR+3
+z%AHrj%c8(%0~Hqe0iU;~pYlY#y!GTnho7X^nvt-Q1hS+-jloRHwK5%`YVeZNI~?iC
+z5Y0qJ;<xmkipcVVJpil)x$(~Zp({w!!RkWc@_RlrX3K*7LeOMA`E8^09up7CFZH@b
+zu}4>$)U?(%N&RLp+cC`3>b>$;>ws8%GQ)p`wog3#EkV`lnZ9bNmB^gA+6lpoTeMB?
+zQ^XzRlCG_Ey~RC|SK5Gvs2R`3)1u7GQOk`pxN0hS@jXt%P17@d*Gw4w^p+Lc*Uj!W
+z*f0eB;G1I+X!0;l4UdhggIa(urmm}!c!SoBlrG-;EDoHpP|?HaIl}1fZhUInQ${)K
+zrx)qdiaLRzz~(Dy#rAm|t|IMxyO0Wug2qgfD|fT@FAip<x)n>xzlm{X=|jXxtfVsU
+zV~gABU@hyLjjqDk$%sAT0{@O0wI1)3k$?N?eB-J4b@WvrXK}S##R0YkNuD{R9C<8v
+zm(pynB;+VIP9_M{fg=s~-MI-VuUB6J+9JDmGK-^KSx#SEq%>-QUVioD!iqL2pGzoP
+zWp{Q)@i!`Y&p#bOFzTGDM!$uz_}V;(=A!fHvr<~dONf>$@opS}<!SkKlBOdCn0@UP
+zmHZ!5YECw3)#FX31(s_c^HOeAJ@-b4d@|Rf@hyDG1_&>>P3)+O6}XK7=|fo8^@?S)
+zc&mAk18kz5x2HJ!N2$CiC|1(Z=sd~f;`gU;c8W)yh>kT_D-%Y;0Nk~lM;BN;4$#VX
+zARKT~-5XH9$pS{PR0vA-0(@=Ck7lLEvq?8D6MQR|=D^mCe?(C?LaSUEp|+**rm>z^
+z0EULY=YeN&(N7=wp@*pFo6am!_!`oaPD9uVEMn=^c&mBPDC^S$UPtJQqui@p3Vjyo
+zNC$qxeJ=&=@MEw|NlkN?=9cR$pT<-knFgER=F(YVc~^J#jo{7J1H$iR#j<tjYiyXG
+z??S>!&-@sd@q4D^ujiF4o$$(AvFfV+isaowm&SE;FQJRC4&s5NC_{WWF}0n{#+1Zu
+zu?)FUh8oC&%UI;~kh_JcvJfx<A5wFXltJ5fIFg{Z;|KI^ON8!ruOW7ejZU+#4IX_H
+zv&xI=kUM+n>y563r(~B`%#ry?wL4N|(<)^*O0C92WK4+bCUhsn-tL_Y%igl=WbWI;
+z>obgT9$Tc%*&s^$bLpE@ZFLWI2nrS;x13Zx@wlfwL_xFyg2E^*a;q)G{3SpnU8Zzr
+z2LicP58+w(R#Tp+^QyYoZ4H35@HLy`RYg3)RUpe>V0y~BHyC{>CntRNObiof9OQ6X
+z)AIW4ZhCrNFgTK%l0Qme3*<6NC>4VuhI;TBs!30DrNl}#SRg;2$i5r&1=X|KsWyvt
+zu015ga*#g#{A^l=g^Z*DmVwd!m-WyGb5Y?I1l->%H&Vb-55v8LJJ6WtTE=B-W^fge
+zDXi;B4A85cd<TM_TVtOyT#QXvD%mu*lN(8ol2OVur4`fTE2NNJf?1Ek`@QA$U|YW8
+zw&-TJ*H7SV*iHDYESil6B@IZM8TyR`iGDNVFbc?d_iB@={z|I(n<*%I!UOkwP6k=x
+zaaS#a(?hV5n4Sm<ae{C_{C3-nX|m}O;Lj8I24_)WvSx2gUPZn1MT~%4O1FStX!V)`
+z2UBVRV>qxnWO>INfTK=Nyv>%0x=N6%te54-@(=6hH<;~X7Wfspq@=v#Z^#WKFS6SJ
+z+0pNA;+aL}#Y4b|WW1bIFDcQV$O5ag#=T6wSPGSg^mniFv-2xF?5z6;JTpj!7S4tM
+z`F9PWLO!rM_~&LvOzj)LsoG01QU|D{5*!82xH$P&Dc8v9Xt#ad<KlYoPW?#-^M#MZ
+znE2+vn;OC8cId*2z$<`H>$|YF$6~(COX2e74`9EsL6XQ#e$N}B#Qua`N(rWTR+;Fb
+z$qQhHbL=U6Qa5$`W4`qwZvs;CVE9z#>$t_!<++A$+lf&IrL7sTmB>sUPo1#|qF16q
+zc#nrazD|xz$v7w3&IKo`&@8wQKbpdNi-<P?Zv@isynvHreffR3ICuaYACQ<s@8xF1
+zP$0VZ{Gl`H?|xyoYywG6VdrQTf)bA`IG2rlAb@~DNf@gbie(geWc6+ZV)xxPIYGb4
+zK|w1!l=Z~h^3Uc=2-2@emjB4CLw_uvo{<I#_66BdMAXuV=H;?N2sUj+JAp1mujQ__
+zYofQJK+v$X1}%JKh!40<gSxmoEy7K=$i7%Z!A749hw6hs+k!v>J$Sk3aZpoXSD(DZ
+zqhW6mc=f;?5r+=Z$=WZwO7G0i`g?sUT*|-R_&cy?z_#ctt0DKp=N|WK4@Po#$k7oD
+z=KBB1bbqs{rXQX*nk-L5O?T@b=}H3ln=z%M0A0)``I%D~g4U+`t-g76Yi&tpW5e;6
+z(Z51CioV+jlUhanGiIB4`1!^*wHGY`i}>^gY4YqLS}IuDI$)AB(y&7?s5Cp0a{PAF
+zt8mc3R1_kVnGdA|rL#PZJU02>)V(**#2W8Rg6|rda|DmsvmzDB4#6dv-Vo6ncfdb}
+zy2)ZXnnT$gLTl>668(dTv1$_Q_r@N^xMhrk-p|%w(B>KgDD!!uqwd=zw4FAgdv#wh
+zR65WYD~^yM1|<>zkQ<jGRkmD1_n2EHi!4mU3Eaf(bPslgPdvx+(M0j<8L`v1x6+Um
+zcLX_2-&B*euw6}Y2b|d0WaFIS1M@eUb8s7|TPEc&OWn$j^y-;jeflk)xu-?#FnnVH
+zXou%*C;OMJ7=U$Ws$@p_@gFi1(E!vLW)w$xC8}4-EM_>S9|UWC0@&QZdNCSEK3vRy
+zXvta>TK>&&fSI(o)dhrc|C`*8?Zc8E$jF%bTt8V&iE{>`JO|q5phNIhB{+MZ7y*(#
+zzn?#Dbc7>CvUSPvPouBpg%ym*b^zs6bU{g~SV(Z|qbzQCu1c1Z1QJX8t*Q9pCs-&z
+zxx=W4II|tC#%XWCYLEKHR+d|@v1X{>z%Hc1<5Gg4pU?Ox2D%gTBGXs#p-ga*P{)%Y
+z<upyG3>-~qqet7T69GQP!Fblv$861Zgb6cg$bseO$B+!>WTLTxp>I@SVT2Uk!5m+K
+z+nte=wx%~gmU4u4R~q1D>c&%JSy^No*wZk?j=S1dQ>YOt{3o%)=S&|_V(4kRUqlYj
+z+jOc$9uXYl>OXRzcP4Li$#tLz)92B43F$)pTwA(Q6H-gS6t8gIwPA3g?7nSId*}kt
+zcZq$Bq%XCF^%rdFw%D0#SS_xb=)@w2MW$R-guN51guwUNx?WZDOySdx?XZz}ZGoF`
+z9g6wjb%s?oLL*0{Y6X%7<mK_K{gF))v_8I=XLs4T+Y;&aMPiGkg$S9ZB!0V>Him7g
+z^!C{{d@A0r2WO0wMwj^P<~1*gBI5ud;}UkATDO!f<FduE@kqJ5|NbHcnhH9)W%{XY
+zbZ|?J!az<$xaLFiq6Z_$FrYc!ea~8dxRsnr*D7qmo0nY+58>i_($Sd%!leU(2S7uz
+z{AuECK~q<d_|<?1kS?&VxgM1bQ<XNuznhhD9JieVs|7%btGHX$%C+#qdLgB>K%$S)
+zDWpbx6{pmVUr?}Z90a@VcSg1Y@f!B)qhL~W23@#;)=Rbo@a0nEPNs?IYsJu%R44|*
+z#T!Ks9m?r9u?g00%Ey2p4iWx*mDaLyD6l6>W!nv;%`+SkP|1k!10yOGh9e#CTEL1R
+zF^YUuy~+;9wg&w2T*CAPi5Iu2Jx1dgk&$kDHBS$87Lp_l)}{Ltm7|fvg#<;!JJuUR
+zc)OaV=Iot`>c8C{9I}N5OrIUpB5YmbjH*NY5*nF8E^?cA+zX9Q2HA002mHfjJjFH5
+zv6)Jo1Qe>-Bc76I+wq(x$**wZGgs!!J+^QDjOz)*j-RLWqD}3tcNBOvNxDm3Rd;zy
+zdfqLuM|XW<#XufF;3I}SNb)iIkpzQ`YEFP;j@wiDAL-DXq0EkIrj5Ne8<x%T$+{~%
+zg|Ik=QrOW!-^{@W{_(CYA`=2lu*D0wtBah`LFIVYzzhUK#?TA69(1u(C~EIS@9OIz
+zwUV9(K@(${@D$r(zI7j{vyWX62<@!P6EB!27w;TJXGW++rS9-)0LRt6#rD~*)^tiO
+zd8Sad4vWyvJI)^IjiK+hNtM1di(|yj7wbhzwWHGJv^!rpIY#ruq~Xrzkegcw-3SXs
+zuhZ&H0PBW*|3c^SY#Us>X)Ls{UG71GaEa+}*hd0OQ!11@R7a&4g3(Z=6Bu|!<ay)b
+za8&{NeZ5aE^krE-of)e@yl&{4oVt0qtMvt?or0&6w}JROiNPy(=+Uc>zoY1OgyOk?
+zvJ-ZtIU)g1!&g|}I(WR;_}H&*$su4%<xBF5hgB1?4)Ubhs`>IkHo2CmRi`bm)K-k>
+zkYP?6rB0(m$`+85<ec;szcBG<;CoBfPek7k&_ApeOa&c6@{1czjtbPa5UK6kVD06u
+z^FyAU%Q*5XZBN|vaKo!;WD%y&T{D{xP+~ZCF_T9Aj4(4qJ+ur2@_UL1u@%?1OlJ*q
+zGo1W~7WJ0XFJnm#)!DWUTmri-Hr3e``#?w8GeM)mW`5b#iRL_B9=Y@_>6+++bM3)2
+z+bwNTzn}rERQY9l`JjjRonv;R-*|NQy;;`6j`nM;7N5bH!;)!biit9&EA$sUQ&sO|
+zx!x9>@)39|?%ni%6WdA^(4dx00Z!lC(|cy7+?ftO0}M9((&91nV)_~@rm8cYmCfgA
+z|7iZRT$OGkk}qm=&dd*?gRBRnoE1`WE_{XYiZ=&x8G>kpV0k0LU&yChP!Da;CriEs
+zmUt+=9_OEvB5mAJ|9v(d0GDyTi}F&b#LJLYFe7pt&Dh4ZjYoe^65N~^Z8|5OKn(+P
+z`?VSRY#8c^R{y1zpZlCZgyuruj7OPlqkk%70>rt0e34v;#>*{dSj9+Lnhqf`FU6B}
+zxd~0VrsyWNVo}KJG7nc{RpQ*bc0_jimMpkGyW(`p3Jmb7|6{Wre~9|7UEIT;>cyai
+z^|4#ktLV>O-k<%$V2bw7{cL5hBzfh_(#6(y^oaW2&5Sc#1YqdnRs=te`I00{>c8!B
+z{>kY)SGUv)zVz02SB_nPOCw5NnDle(x$`_)a+#s|Y^XlIX&B0k-Bpu{xoISAVd*5b
+zi9eK^wqUa;^yIX~<zL&;`vO3<UmE%AnahCqnQjN|$!#@(E|*NP1!*#z+#pajT0Zki
+zuPC=od4QDIvO4(_x4N5IZVR#O4~p^VlPth?q9p1|w0`7@a9Ie?c`0{MJ#YP+E?2uw
+z>AV6$=i<(1B{bP!#-6_Uov#vrOA&n63KVBOeR4TGd-D+Q^vi%;rw=LpFRB+&4K~Ft
+zn!VXK?+&1iY$3YvdN(t%xOfTYy_~W$ztQUV(L~7Md^a_6T0gIpOOpa3|Bil?c71iJ
+zIe2+f)6&ivFUY%R7o1tn6FeBvc5wA!7>vf+ntDUb8XEv~d*gDz#(cAGDw|v{#?8oy
+z)cAJoF#*sHC$1sd84-?r+BT2r)nAeS&JNDk@n@n`&jpEjM--HQyLT(b1}F3n#RV6=
+zqrQrnb6-nmZ6@2BLuEMsFBLW)=!h)Kcyb+7?EiccGZwBr*^}YG_sY;qxhI}bn7_VK
+zwd?0svqoN7+WCbW0My*W#8Z}7n-5?;JSr+D|8J3S-LA5Haw4<1O;cF^cJ-oNB)ClB
+zDH!4DW>k-HRU>eIk`nUdi;1HN^grR9s*LN*7gDD~duO`K|7!x(Ge>)iZ=2*BDE&-t
+zJ)W(nn-BfWBo*4efmWX)jGB*cfSz?^FoD+sU@CD}9_%pD`ROuSQd4SpfmL1p!A$x6
+zc4!_B5dw*j66eVBA3p_qmk0jF_QGOtOY5E4y`85=9hDR`kpf5&Uj3^C@_of}MMO#!
+zw8)%5uMd1lv6bI1A84!f*&XoUvkua)BPfD<tLL}rL+qiZ?6N56gkWy5Dl^*t*UXxk
+z6XDSH_T!}r&8^GEFfCVcjhEs9JmwIsy}i=Tee?^s>P?NuKQA1bvG;NT%rqXa&63cH
+zi_^N=qHCMFkp90EKaH`eaS)i(RZxrSNX5baYPr1)#R}by+4}Fj+nK|Qr7sGqkYBAA
+zmO(fR0nVfrhu*{FYSXnBc)eTVSe9Oid|DCvkg#F=?!m@P<G!m<4n_R`6#vy+Mnf0j
+zL`8-d36~t5XrC>yaD8nA;DsLzfLLvB62TY6kCwovj=)@Ja>Zz`3Hfh0U+7;~nme2S
+zSf-t+bdldN57I-O<J<j@q4IX%)Y^-Od_Qa~XbW52Pz~Rv%f$SYRNcgn9;@B7rbQN{
+z`#D;B5!V?%{Uu}CISH}xvJuYOfN`-GSKFZ;sR7uOnlmdJKcwC1Z=gmyn`5rSo)MAj
+zIOc|UVE0v~jS}I${v1LEC+lCOLr!nXSZe-?|8186p@1bt&{}6op+WS_+Kw?n?f$=j
+zk~~rTF`u@^%0VLOeAp@Ot;y#OCF_GF8vDjJ7jFZ){{1mZW7NLC-*W%@tB6{GVK}~$
+zf4Dm|Du!scIBDuUee*&riRa+TlWh~xVL@^1NQOFaG-}>V-Z^m3C+}iG`!35Nic#Pv
+z{}h4=V<92(0|V)iG;)Ys`Y3_(3g&J}qZ@=*rur_fkYt?(Cw&Yh6<6jbCldt${KNa`
+zTat)Hop{$mp4u^0nyXmuRu;*W+*aJZgM21zl6j_B_Bd<26D8{IIW2Qle{&;i*_C$5
+zf8}3Vy^z{RGwilx-Q<xJ2YP)YnwYx9GJb*jsA>*2K@m@rx{j?nnpH)oQ!^ghu~MuB
+zo1!tp)8;wVW*N<;isz>1H})*Mt}0$^m41zDJADZj@~>)Fr`ipj{vC(l#FODRxj2a0
+z@vbW!<=P_tY1^@}rIm0P&xLx6SDo)w9A*8Nptd1OA20y@oo1qZT<y1McfWK$#*`m;
+zky`d=0a7eUFB+mI_R5!%b4*0=8$ax4*00_VF!x(Or}mO&PvRFv9+p?k-Y2PY($mTQ
+zq*k8WQnwX)skQAvSjDhsLrcx6DK#(I1vMML=CT>k@uzGHhjThagWQ(OZ!#?3c>7xk
+zLHBN=xT2I=Oh0`kH+xv*8#H1zfVG8NiDlS(uVuKM@RY+c%A*N7#7#AiW$E5Z%-$F%
+ztjrU)$VA-n{Y?WM4MRb6@lJ@vIW?F#Cx6O%d|gI@Ib2_x-yU1qXe90B#rUk-xx@~_
+z8&nNHqW341+YnmC8eK|%bNnmds-=?T9t|{``E9yr79CRexa-`ma?351*(dm!2<s(d
+zqh>~<>QFW>-fJZukExSSghM2Ny+d%cH>p6!a5VpcyDkYQ@NerOVClBTPs!|c^dtPp
+zO+55mZI0fnb_AbvDuX_kJ`U9gb(Gpd@10iq_p?8Y9Qmq|51A=zP|8T41^39(onG_)
+z!8;>FIs!9V;LPf&KThvxQ8x3}L(7)x*3kfNbN04@&d&XwH7{8jXirGjImybQ@j-Z5
+z^J`J_TM0Fa{hoqBo82x-2T(8cKlQ0WV-qwTFS?gILwV4W;AfiRNdtg_f~3##el#+$
+z^n7$7;hoHMmgVfS_Tf_V<YnUg;}BeYyyhI$r&&gX!AYGlH-V>pPfRsm1P?v~I3k;7
+zi2&SNN$8SKi{vNHNs@B<)t#;+Z+v=_mXsq0y%9ibE)n5z;;-g#AKhU7h6nHB$Zl%1
+z_@(ExH|QUrSH547dO%p)pCq^3W{$d{XS@Z>ScjU+-hd0_UaAh62=5QlO~Y~YC!Cw6
+zBXrBLVhn$CBbUZbB6f8Erqt)yJF;o>c~ngdim8)K6!ii<-m!awD(V&h6%rBEIFL1P
+zVImXUl<eo!XNw)sVPdMR$0Mh+%;`Wi0o&hMdvFHbSTkTaYx(P~`tI)&p7`=Voft&C
+z%VgO>;KoS>r(0N-918KYdAovcw3$awIjcFt2W)4}jHPVk*U&g_#@ruEcbafM40r8&
+zyuHh%$Vc^5&X1v4n}HyKIxIOy!+iR{XZ2J2rSzlxWDj?HCG`EV*Ya*Xcoj`t>8Q2L
+z+&sO&Qh{fEsZsSMvu+@cQxShqTVxEQew~nAQgtnS-bY-pAC)^+h=w1@?<0we9G0g~
+z){E54B~p+fEN8P`czD|TZmSx4{?JSPx>$QVNvx;d+cck?^VWbsHfj~o9n2aIgtLAx
+z=2QF?E-LJ24xBxGVfW|gX_`szyZIC5_)Eb1p|l#p&V$XSt`ea`n}GUp{~g(%{he+D
+zoiySp1AaanT-s`%$vhT~`GM)K0X=8ZJT{PiO3(OFTie0I>j*IHM&UEfMiKKv81poc
+zH}y`K!)$$wZ0I-T#F2xku6L#wHSzE4)W&ck0jXd&yKRT$SS^4GGdzPTflt7v^)4Eg
+z7NOg9Q)t0(o+*}K?#~^X4bi9J5sR|p@lPx{ceD3m2ooxI?S<tX3}v7Nejp3<NXx<<
+z3ud03UasZSipaceP5d)V#(C=vnw`{peT4apdqLsWjkwtvZ6&l(KL^CwHA<b*Dt;Bj
+z9rU3E5cAJ-D??QhuP@N1vJ{{EA(!eI-|c-#m}t(Y${SiR^srw#00+{LZa<rJi}-lF
+zh<T|$pPPQlAup#tEF(+3MT<1~?_LNRq*Lq9IM0mV-%Y~@12*@lpC<EgR>E~l%ND8w
+zjRW%;0S1XWn0FJ?8E?~7)Cd3By<H~s6E-H~?44&nu~tGQ(PrAWG+w`Y!mHLzbIywr
+z1C;-1?0LkeQVuQm%p?0Ibme0j&w<CBOnXp9<dhOyzl91B{24=KbPO<{;b)sx^jeXX
+z1is5%umJ^thAK5@9UY3jd^BO56Sda7r_D2`6MT?NChOIF7+Kz2e%s7DK!%dar4LhR
+z?@OXo>;C5~Obhe$6o&eL7SFjj1u|eR^=pRN9lAb9+1~mR%Qv%k?DPpL%HJVpdoR1Y
+zT4dx1qdRR43qM_=zUsX<ZtY3~Bv#H^#Ifg|Gv}TXbM8u(on807hv_eBCg&5Rr&taG
+zYOLkfAQtdmCi8PoK%A38knS`Gl|fdl-KSIAZdF3mG1KV!NwW*=c}-LxLTG)FI|ZOF
+zvSn8u>PnDsx}ar6#&(s|byYmH+<lnBA)RJ51OyarA{g0xXYLhf`c)93;@0vyg7U%|
+z8rIUgW#ef@gsthe@(*;_i7al~66-1LMZGs2hGQEhS;mkU!c|%?a?X~b<$7aNl<U!3
+zlBi8Qx4tB1mC^vl>1u)|H+7r{fU@ashLOElUlI@+*$jO(r=a+rkf{bxD1MwrhW^Bo
+z?c(Rdb8#LxFFNz+dDT@Ic2nqmfL4pZ`~N@4!mO8De?%=Td`Xh|G%2Sk6RD(3dm+Gf
+zZe@`5M+_T#Y~S+SIwr_J<Se?Vz5>|ZN}Bmc%UjHy0`0j0OLFC@$=uCVKejJo31k|K
+z)=o#9KfGjiQ8l~6gzorxhRiZJEgkpW@V6!4Lz>gPOvJ<9%vYCd*B424pr0ig7Fk_|
+zzL)y4HNl)3jsHwX2zpKYQmW&OIvV;+*z9cdoREnwL|orO)z_)I=GmQX<s7VKYJ;k|
+zkxiP5oP@8PYQ}@_ZMl^=f1+lJ4SGPl*5J&QO$m=&2cvq#Bn#Z)aU4vu-7M<9CO@$T
+zQLDM-3N)S7B|lnB$c?9-hv7ai6`eT}mymIO(UBwaNQ!+2W@s-Um-Y`GV=XaaO3M3N
+zscV+wSMDr9g+TNgFSoyM0RN3Pzv;I9O1!|?2_Nwd?y5o_Ql${uW7gxcMX#$1so~1}
+z;$%7o(^UVC)YU&-H;jSo?jqVs)j_jsADE_mw2Xx8)Y0H=4Vgx}irn9I(UfTSbELj(
+z;k+ilKm{CJNMenNsJ=DTK+uK+&kG*e)I;C4us+5+J&(&!g64y6%f^5RlsjY_tR%^O
+z1OYjGS1XAw4`sYamncw7McA#2S%CPiIZ%Lv^0WbGBSuR=5G3K3B2Qb!anJzn$L~_h
+zu|xXE-ed9<ti;zRhg!cb0(|b~kwXmLM*ofP)9_?^eZnkHI&qsG-Je=aUn@UFg=&Om
+z!topg)_feFf3{viCHM*`lfwBp5wCZ`x+rg=$_{RmMlTCXm}L0BCKf36v34+}=(Sn0
+z-_5)Su`F-#L!C$CL6wuu{%-ZqU+!bs0MFNg+bB)4IjYh<G3qlG6d*%=+u1rGrbu%5
+z8&#7ZD3#^}=&+e>6%YL{K6cpWKQsyF3#@iGGic0fdob{E-S|}?W{KqnBud$ld%61M
+z&-0mHNT|EwT5I5@np`XH88bx7e`_ILFN2O2YuY(zDPSx>XG_uc)9V+4Eeob}k5I8y
+zDpG*Wu1Hv=h6JQ&dM(J=Da(!xnf)E49`vpR^yK&R=kduh`U3oe$~Vo2_-UfizKRP-
+zJ+4>hORpYFIhuow2r?<vtsOEGY<Sz)U~H|m{F^UzajevjAGR{HAEGgoXE=s~M(`>&
+z4up9c+wy0w-34(kpz$sG5piytk9{8Y`_ZcB9lzn_79N!r8`KPQl!nZ`Dcw~HuK+cJ
+zLRt(vIS+jc^(B@F0Jv?BirdH~H30253&vHz;h%(;f%BuSPmdK^Pm9h(tU)3?fnZX1
+z!}s~iei5$$AHj<(4&K0PwE<{_S^&)w3$6#RdI2@6jG4UT*s!-o=xwx5F}TSzOo{LF
+z6}O{l&z%4(C$^PIeA4NfSLAZ@fjg<${eRaEK3h<laxAB+@aARU&p{y)O}F^w|IiPP
+ze#-r9{zYfYi5V^(zSec?dSR!9=)Ec6w4N;(;r^C(c2Vsd58WpC!`+Oi;Z)V0FIv$>
+zTzpp7oa$CPib9E;_|m|{G(On>C5NhUFYdb;>H7BL=FrblH_?S^ZeVwBRoC43A;k4_
+z!ApxM?bOQ%XXE=-i{rD8l<8$B9A=i?zHpdf9T=fyxoXwvQ`uZKiFzJ$t!?495}~&h
+znhP}%>U3(c;OKcmgr7hAO=%+kCQceg2!{IMU^FtnM{oP6FZfZqs^a^Gbt$5L0~Gz(
+zlQ+Yfan%k<w&E3w;Aj@L)~c!+xHbC>qBoASWzZN-Au3GY@g8z3?6IKdX`8bc<0R{s
+zc+GgJ-V0F=r4?D%v0R6lk8J(t&_unES~LmG2tPl)<)LU`pojOlZATNBiRl=#+Z`f3
+ztuzCf5R8~__Y2c(W+O2kbcA~Z`_Sl@E_eIYilD5i8V}y4YLUH|ik2WJ9c=DB<{h8?
+zROqhc+LE3(RlgQng<h<;YMQ;H)R}<stNo1o)vd~4;QfU}UYC5I$|lEfSep_+1}jeX
+z3?Z|f-UEkBWOujYOyE`M%o;EAp>@}Xs@q|};om%wvJmpjM|Rdf3Y=bJRRK{kK_3WE
+zpl_c}d0n}sC~TY#qR8Vwd~Z>e8!H1#4DcZ=a11ex*_(jZ*~7ziCsadPqbxy3P_(%n
+zksBnRv7m9NQ&|cO2?Z5!J@i=UWbty+a2YZZ(peR_+ers*6ufycgnb|+(zE7ry{9cE
+zvKt0o>r(jOXbL>N#Y)2CR~BTq^{2Wo^xwLF<@DAyRzzJMbP{r=R9AjzQ+wh&J~!dt
+zx2K{$;uhY&LVhQc0qH>bl4unCZ_?=GO4S=;!AxN7-id7_LF-~IHNM*r5@K&w1B1RB
+zH=39_$qe>8w&IFm&`>?X<?=h&HH+#}hB^nF$(C<^zE&?%HO~WW<sr+Q5&|d&=y#1h
+z;|;yEHH)fS0Qm7{XfBuda)6Hkz(J(0ef9NWUks%K$S`=>$f8_j<+VWr2V9da%amFm
+zKtX*9HD0F2feZc`p8<KEcJkp_mn3I1efdgRVOqSAG@aL!X+oB_pWgC(fSYIVsTw#(
+zsi_gBG+Y9>)>3(22U#gCjEcdIs1?hOq1jw+omF+rGh+=J#PY<WW!~+AV)OmWCL(ti
+zIzvL~a2W7Dyc_k^yM4ltHjWm>5a}f`-UR4)ii+dd(TVqNPPF-qy57)dKc70jVj=6$
+zdV9|~-Hs-Y_0Tq2Q%40K&Ul4TpUjiwkcKgtCF~<JVdty1NhVHn5DoM*=lAK|ZPuet
+z=Gm;Zwh}cC%CI8k(%&rrErt7{nT-_GC`dKOD+vt7i|2-w&0gapjGX@8e7$=>lXspk
+z{Jv+WuWQHE=~zz>j^LSTD+5?;rBp%)>`ccxC?+bz6d_QnkO36YkVFzfc4{kQtFSd7
+z26EY!OH2ZZ5)ep87)7Prk}V;`07;4nk=!03Br$}*`;DF1-8pm4`Oj7)PoCfP`}uw@
+zk~824vMPNUJB4io8dc0QN%*pPKZU;p97yY}LEv*VuGcS+|29HA__>Q;tf4%%wwBg?
+zGcc`34p5ZaDf!}_u^25NMmT2)NYUl0aHJ}Y(gh6CV}AjFYp<P{BSG_uJ)<~8OC~>9
+z*rvp&`)o1q*j8JqdwA-}uNMltej6GcF*)(TsFR`%hj{{aAm9wD>{jc5hd%dG2E)q^
+z1*Dqwi8)`;eH!^^$uEa&1%G$=e;X`rFc~m3h~SoK(xJnj5aL6A^!V)<-C%p;cfHTz
+z1~LoE_pOWob0ubba5uXwvf^c0)ZJ1m<-a)dsV`0ah9~b=ef2A#%qZ^Xak05`dvS9+
+zI5N$%Bm!EIb5|h$)cNesQu~11zi@Gg2G)JUz0F(myT8g%Z8l<J_JB4_Q<5npsTJ&@
+z_jJ5k%~kg_6OzK8ZpN7oQQ}y%|A?t-8tOsjI%r>*Fkt*_DU;P9OFYQEBGr!}pD86Y
+zvKr2w6#M?}n(gHBmKORDl7F+Y?w;um&g9he#wH0T3I12rS@SW6{X?gu?&L53?_uIN
+zxu)vfey*-ows$!uyRY$%9fV(R=!K7ZW??Q5(2gUn(oUHq&kb2)3pQYnE@Djq=&*}X
+zg{w_S{s29)u38P*Le1p$&5#PL6ln&*!xGdm%Qcqo6JVgE9chr&20uHW9`eAux$soM
+zbzM*qRqXSMB~TPW9vshblHyObj8;L9=;bfl91D`79ms>;-<ld;PItXZgm>eC$JAyg
+z<?Q>guYMy_gSB4_1FNZCL+>Xa*iXBo3UP!t-(#x;OB2(kd;B-uWjE+>H;|O8<K$r7
+z+#E`I{VAPDRg8#{KZfnE9b6rel+$pa9KGfa&)HxQYBCpxc0WTw=rbVFq@RbB|GfI8
+z+PXQg334sv2y7T2GvL8lP?rDOQ2fweqkVw716$gv$im!{|0J!tyVZs|yg+N$9I^hc
+z+E-l<qt&;5dG<N)*3R<%t0#3J!#hfTH}IAT3`H_=W#cb2n_a);rQK*$=i90v+J>eX
+z>2+1jxU+-)+uEK+<lk0|j!&wr3E2W=O-pJ1xTCZ%Y(%VHX?_3O_RW+oQ@G%1Rp24y
+z3HqW<yyydMD;!gEoNhlwbTn7Xb8OU`YG9F$h<vXrNym|{z2Vn#ZXCT;K0Zz6igbNj
+zeI`83pV~@u{QN&n>c+v?q*3;X^xKsPNJjtzluzsE`t;M8VD-K^U<)Ob1C^*Z4%D-?
+zbt-$*bfe~z%iT0bsS;hIHG<!sm^SCT@G9+?eR_W$uA^DPNZ^@cr<)-vS^XK0N6x64
+ztQYAlGgo-Ob3Q9PM6le^alW}b8$(6Ehk)-wR{bU8roS+@_FNOxew6XSC2-=aWO~4R
+z?|b;<@kG*5i0KI{?+U+&9e+~14}Gz!pEpW+MY|gEBVvV_avx*ob)~NFHm%<q{W}M|
+z{=oUZEy~t#9urQ1S6E>8Bi-7Lp)s(LaKWt6hH9=HNJL%zN%A5;a((v$5W!&F;EAgY
+ztDWV}v}60eI<u}9?4%TiBf4(i`Twe(Su9pB#1gufBJK=h7D+>bb5@d*+T(tmclEcP
+znu*_dUc?f9;A>n%gl^SA^deESKx6aR;KpYJ7x`OM6w9Rdj~sgwxWTTc#`8q5<ps6J
+z!yTkK=c)s{L@;86L%Ni*y2qivVm?eIZE#szdp*R{nO=zIM2EFcT|s_#Eg^^<4<mw~
+zel+ZCTxEo)ooJck=9J;)D}K7j%+(qp=zHVK&i)Xcu)&Rs13SF^-MRl$xTWtaNean8
+zTfu!|b%8?A@~GD5C`EH(P6y&-LkYZ4_QgKoC%$;}<2)Q@OUhR|0nd(tRSaOaV!9KN
+zV!(MyL_f%=S8AqBatQs{LST6Xt}U!B=)M@V(ej;TZH@I)m({WSB{<kCNJ8k{gNlil
+z21%aKOkaOr&x~R1t2^J`Pl23ZK>|6!DiyrpD}i;ZEE#wn5i&RYN8gs~x=PDKy?{KS
+z?M45v{?Fe5KSf08#cD#<jkGR=n*9Z%ET2N1$0uvQ`=m=L*bWNLt#xF0%GVtiq@{BN
+zqtJ*-S*s}RX=J<+>6_U+Huy8c`4E0MHi~)-ZWO+u2oSQD2!|4=?a;UR9Bg6@=LsLU
+zZ+=C4s#@5Ra>=EQb?=xq8G)L!6S#!F0|k!L%sOVIiCnhsfT%tGe5K$@0ELF_(|FI4
+z=}p*5<$xnp`?QrRAAp*yBiwRNNn(KK@w)@=*TJ9}%n(lupa=7~4xk6d>AoNi6x^_)
+zx@WuYxU0~auLM@58v{U`-^-#!m<IsxuKU;Ehc#vW$jp$o$98-TuL#JemnPPa41dx!
+zMMftef8c;FhYJ1@C+bWtUfG)C=G?R=5hdJe-UE4)J!7@Gd4havImptB=MSofCnesP
+zwkL%H7&JH|Jgv3gmnK%qFZC3Lu;xSPFO;C`_!^rZ37V2oUn#%|2e`@Qk&D)c)=iz2
+z@6LX5L$14Q!L9Z{lN2AGtYiW>-ZD(_7<PO!u=YIgT?K@T%q0NpFdve{UA_iXVR-Js
+zQOI2Q2*BiMkY8G_I>IG>@x)>r6b)j{(07TPx;#bwsmNcrfoKfLH|T*Rmf>}&WIl#J
+z2DvQZDc2z9WWm1<BD!<_-;{ret6;5GUZH)nCSn}V?lJ7^HSFVB_ES)Vl7VfCK>H3=
+zp}K!~FG%3PRU)>KbbvAXmODf9{a~rPR`^}H>xZzBm~7uqyk$4gb>W&Yhh<a~_E*VH
+zCZk6HZqlJ#lk|6UXB0wcZN3DCw~ZW!Qt!>)u1gqdTt-y@U2@=VL;a;pO>Hul9n6-s
+zdzaGl_9li^+K$ck_OmUP=erlJEfoj!<YvmeaDm@dLE9GH05b6Jey9>?a2I7l*MQ)i
+zzMtA$5s>!&qh}M_1K7!&oAFDqDap+PSoPU_HlO@R!$jqN|AOcIv#AiSpROa$@5(9F
+zkbVp|`QrQp<j?Z54FLER;BEsI{-t~&NhrABQ=gkzR<)Zo$f<oohz~M9i0n(DxW@J(
+zSsz<K;Y4)i&Qt{~_ZIwjgw$U<i!W~Y_N69=T6VoGvqiF>ha7GX7d~JDr;w{{U3yW0
+zJ{=s%N=Clz7<toVY9i-$PEl?y{9L(+9Z`M7lb6vpFdRAG<Blkw(2!3CoQfyz5siO2
+zA?EmH(yt$1Ln~h5yn7G98Ym?{@IdlSIgai~Of>HP5TX#YJ!7~ZeB^yNB;_}z)B@Ta
+z@1vj#)!2|8;t!*f{K0?Hep~Sd<j@{`6U+L{l^J`0Cm++(ezO-5F42YOm@-P2&?WTd
+z_ie!1zg5`elf%g*UuruMLQwZpis$bPYd0&6v5xB(2|s7*QQy0s+Sb@=Tat$eoW!0@
+z)?2FNaK~vlBc&_2^VYE9H~I{<jURPK^6#~NrXpVS;{GGrgkoGt5z*)V&GP3ib)Uij
+zZ*%I!1cTy#8pLU<)=xIAeJHF)e&w1A;|M$0N$72bByi8>f#=}1-mK}vyyS1d!r)8Z
+zZgepfkmS4w65zfE!TkB>t}6-Gn64kpG&%XM0$p|@<%@tAsURRP_Us94M#WSMz}*^b
+zkA4T?*3ZqW8Aj#%OGBsM)$+mB@Y5>Z$ndj#JhtGV)wi{8L*X*=#KnBN5RB|~V~yIY
+zDF$}yC8Fz1-pKR7pHh6l(ipMspsZo{uD@=IyLiA%a9+qMKfv!Fd7i^xG3(6^-w$85
+z{E)etky-e=yjxK>zmiW8zex-M@B5)ASKKw0cpG*J*fZ>Lvzp@(G(1CJl_ptj&Wq@b
+zb>uTZ)R+Y-UE+@jD(gC0E24fc%U@cOjKtEA0H}oQ9S5WiPD(=Y^EO20stx{wV;Sde
+z^VyaL1D5k2&>$Bv<^gY7P=;-E?HwL&*O%i%K|#<AnsdBQUv0_-tZ0Ll$xO_st{=nm
+zt<lxmSItN7RZX_>YadnY3&c`2uIZjJ1MOeGcA~xrB*KPIy`pQ}88-r<6ho)c8!bog
+zVec9iKKE6V&Tk-jvv=j=%+0flYap)y8Pr}y<~-!lKwJs(WPvO&v+kpj4$TuzEtYHk
+zM&~?z*>YgDM`B40p|I;{6sl|LD6&&9OZwbD!%Xt1B&tR0VF(r|y>F2?XxGRCWaU4?
+z%{ABeb}a6&=kd(+H&f?P!nkzRIjCuX9@x*d|2jl^UW2K6BLzyF8{gcWhxB3BcSroU
+zdaT$rU@D!q3~P8HfWsQozR9xxo(4BNgw9?tcg{kj+VPa1t^Ip;>?NkFB!^q8-N7v6
+z5;bMf;2aYQ^#Jm<dy^Ia9LvR5@rV9BE4dTfWq&Py+k07_Xq-o1k)QaW_!XrD@=zPd
+z&yzeO91!?)Z&pUn&P%pa%p9849pzdjUh^H<ezH$4*gjKi_(l^lsX!A)m$?(3S)e%|
+zoK3^HzIxaFI-0Z?1Z5EeH0+bZxF^daWcu<8(cV`L!})aV)MDyBZGhx^nzqLsBUZb|
+zRSWo13n%9hmKrI$pr`rXS`5%2gUK!5)VB_<LUT~8UX1nqdbEs-e%=ZmM$I&cs1bbc
+z$9}piUoW3*RE+C^&Xm}l+-b^m8jZ3GL$urMJ4=gk3{3}kLe+sw<G`q$Bftj!`wO+L
+zN<&r*pGH;M2QvNB-@H$)xdC|}RuJUxNb$GMgV8j~wpd=5&VWRO$*`lwi<OU0N&AcW
+zj%EMmZ4ix~o`^Jp$_~N@mO)5j<e_q5q$1@>6+eFoNaI3)bjm|l=7>9-LomL`oKch?
+zxBhysY*z3y%NI!Vh3F57d7s{>pZahw#t!XsIcZ_t1MR^ds*q1)^&(N-zX?40%|0-&
+z0?~pS+~!EF$tOR;&}OhcM+eA`#!$#J7wSz0ZT?miarEFUAAN*T+mhrf-(Yl&kWu^R
+z-B-VC?UNiOaEAImn-VUkNs>9jmgVA)$_}NMUKnvCg-nI2Kvd}vW3aQB@rvfqmM!r;
+z*3bIpdzCYsMeF{@c*eA&w-|0!w|w6WfaT}FJ>_%oG@?dmk6FdB@&}$5t@Br15%i<T
+z{o+n&#cIhLY25qFX?P%V;HLc#Kn%%HOZFqnn;jzJ=jd)yojA)M4g~AM<Mnjvc3QVJ
+zEtFL4SREoAFCYZM3hQ2`j?8T2Cme7-4M=c8)BoF-RWUGLE2Dx77dcT&04JZDLO}tR
+zP=CoMb@l(n+6g$7Rf@#^xfoCaRk?^0sxsDrePn<`NM9_;{%|N#+_-WmJ*PznIJ+YT
+z{9R~&_}>2K2-*N{gEGv~4pFQld21#}&PcKht60l;!stO71X5f)@CustXA^X($J#5J
+zW2)sk*V00d&;K5)r1y!$xH#0)s*A~8Q2MmM9MhL=%REpPX{B6{T^**B`nca*AYQu_
+zAcxFg5C!gYHC^4{;Eqg%dLeTU)83$#T^`C<i|YLaa4BW{S;z9lkKny(_;NDX7T4bJ
+z@HCKWebhe^`^@P|N4*>!95`S9ML-0i+-us+osGYu!gMG37H+L>Hpw#pM3r1^h{F^P
+zAs3f(wVS;eUG}`}K}8$~JbCc*8^?>A-{D1&uB+;FN=xR3S|@Z_eyjRwY&tFI;oQr)
+z3z7CE=vxGk*AjkId;B$efhfDQB7GS=f;2H)G1gD2h_=;=z18TNwasEOfcH_r?yJRH
+zB<{GwWtmv;VW;|JBdPE_F|5}xaQvb!p<gdN7caB!?w^i2zw=69A?nju>c&uZI<YfO
+z<Kh6&Rkqm>iPe@D>QTK}|DV#B^JK5>uaGoRwH_Lta;s_r4JXGdar!jr3tPD2R*uI6
+zg*FJgQftv3o^-Vf5<w}ZH@0JH$-H7g*?tE^Uc(UevgSiGCz1cAy%nh{RZM^Q4t<!`
+z0~V-p8B)o9tqE#**FQV)^-Jy3_=}r=RQW_d%Ogc+wEV{!f^-y|i4#^w$X=vjn(;Xv
+zwR9jnY=pee9aemx88vNAhYa-HmN*9K#|(7Y5n4K<=J=hdL7?UC4H*wD29CTd`=lyv
+zhRC6<j7^(D=%A`fkoRqb<q9&t@+I~-@1B&=@(5R3_TM@iPLv;*yMxPR9?0wq@F<|q
+zn^=q<rw#btoSsoUC`;0o5x(=DMvfQM$^h$~-{BA?ldk(=-{PExKnZ{7P#0na^-rF<
+z!az(UH2-GQZYHQJl@{h3p3UE%%7FmyHqCcOj3G4{n6yP@<P?PC{M^AM|3dk7KPYpO
+zgro|92*!UkvY*FqWS_r1ocWDwfUlDk9whi?LaE^)H64`2Wdxu?{s>%CM2cGN)nPYA
+z+OGV{ui^3f<~`WYgJ&um{!dZqME^PP5Z9v@8(Ye+=RFJ2nF(}AO+x_{ASCL89g~2v
+zacMuUsKW~Y<2;NpoTSNy5Gw7Niwd#hNZV?2R5ciKG^$<L3~wqNKxDomE-qH~c+qc)
+z%Gjfe-ZRycZySLg4`-(qypuTkx1)tG<tceQ*WS#EvdsC{X&d-P3}atz9=M|3M5e8C
+zD9ggDV5k83k0C7R;mYP6BXVUNO~szppW&L~NOP!9WAjC{BPv^tF|C~#-nJBzaW@1O
+z>nX?s6IT?~w=^D}XbvG_BQi6vFQtZWbg~~+Uoq4roAUUHIk5Ywdg*Q7dtr0FzSy%P
+zrDxAn;GJ7Eamjx{vX9=Xg1NgCdX|CoutF{xn)oS&GV3ekXbEIa-CBLsi;8(-n#S-d
+z@L7pR!wt|hg>siZAM=h|`iF4YedYihd+3btx%70}<Rb1d1abetie1)krhiV4XG_+i
+z3L!V=4Kh^xLsNr!YoY_|FSb<SZ?x`7XNtHYA~+r-QBvxLR}ZF`nn7GcNjflbG!y``
+z-D4m}T48AJ#SvwV<Trw8%1dYVAdk+>6PuOVxp5N|or_#7tg)8|(Itb~wxby(s~=>q
+zNrfFl(B^sxiXMNr(fi(qHL~}=NJOI1jA_3slfttMsz50T0xh7Rf*)3_`{q&O5U?`I
+zp`JHrcOv4NbojFU^Qb;X#T+s(&7XDf2Sr`0(X*e_F`j)-x=fz$;V?Dt<=#v3^<*0)
+z;K!Q0+Pd_rm15zzH)qm#GS@xG*OBxr)r6S8p!1Fa3Q~xK$}|8KOb8ujK}ow%*HeGg
+zd?<YdedO;@Y>-7Y6XELt3@lp`{YXgoc8UPX%oxkUgE{Ct)Ls!ha4Noy;*pz4f3sX5
+z6YBf{YtM(Z1PIdXjAq?;@d;*A<K%wU=r~Ydd2T`rw6a7r_$putWk<i`Mxg=r1XMn-
+z8rU%4`C@<fyEo!;VWXY)N1kXofa7UN-zK?)pqkZoY;s8zoCDoD3M~#xs2F+PV@oG%
+z!|;3(DGXvm4k~}@8UYh=^j_8%7pq^T5>hITZ$GNA#c)F@!-`KMv%Y4^h|sa1sE0?C
+zHUj^%o<ahMRi8~?Dude~e>kuHlvN$BP`3L3)z7=Ns;A`=E5>MUk$LoVPVG0E%sXl=
+z_5<oIO7K|^321k7U+->!K#0<O#cg}{^=oo^zPTX$Tx8>)Xcy4XY&v8Oh+_le{<O1o
+zg(*idbYey&=@v-{uk#=%6w#0urbQKs(+fCK%`w!<HYtv$TmVL^P?F579sJn;crH9U
+zl0gO12^#s_6-#633H84kjzU~C%Sm4N$;&8VOm5yYLU+Z1QwAQg{HjZ%`M9i*V_s~u
+z^7T97DYSXi%bkw8L5Nq6sUOPBhCDrY0op~@gMV2@%iBhJnA|vG0mq!@d5KZm0)GnO
+z-M8FV)2X!gwCFg?pco`@swD+yq;JV2%ei~1EP88v?MX9G^KeXlb4l=7(9k#Y;&s=5
+z8^0VkPD?#II$l{XSmWVS7@>eKS4xKT-%ZvF2Wh?xI;my8{U89ht&NlCU-h-o+P?F4
+zlj0HXFm~Fyy0v<8A&hu-!G_^Q&?tMS33FU;tb#Ov{7>Dphu{g;`{fkqgx;gYlWjlx
+z7##o~qr-s6PNeZF4t%A|xO^*(vUC1*uv;J&s|*`~<bjfr@^3Bf{=&ZYLB)!4am|SQ
+zKS#sXB7Qc%4KH1y9Z}YN(7V$^{sAG4oZf!aNE<`dan7{VebX*jOTNt23BIx&l~j1K
+zks;%yR)hO9)JkToE6;o{f_5aG6!ngKN9Z``1<|OwOh~FYNF!R~tfjRxX{N;?=by>l
+zhhWBkgt3$8Z>ZD9XRVe83uqbA{ww}#+9&eQNcouqsg*%=H@WV~LU0?6&+>1nTK(nE
+z>t^{gW%G>nt!p{?w*&0QJ?mI+gR!i-wyk1fmHA!!Tf_P0RM*y9un`kN5jyZ~(HUq+
+zI56AE_pbhSPEtHaLNznD8iRY0w`lc!2dNRPHxj!;+w5@3akJvkjl4bcG{y8C{sIZ$
+zmx`v@^x@^=U2gS83a${EsFN0~)%VUNKNvdQLocd%N&%flqCQhkDQ8sw=<W+w$3bSR
+zi*C6b;Gi+!GL&3i#TFnNZCBayQ!hP}h*jXx`bo7L+@i$|d8v^DBbqfxTGm*(U*|Pi
+zFTg#h8OWxQw}L>8YSlsA8Dyc22>9{lt?Y9v+@G1BM*^2E;cp}de+g}{4F8{E(JP!g
+zcUW`J|9!;C|F~@R*Ro2=pHyG#TUf{LvAnrv`6YFI-<3GoXQnfiy4eWZ-z7po1oexd
+zl!TmM|Jci1SM@8Nh?nHJXQvIS><?_Q5K{d&gmd`MUV&`&((G3;EbyWZI&Y=e&hHu`
+z)Xx^)mHd6^!Y0IO2;N)l@crTlE3Ii~iU<t{!~jGq{VnhQrCPwOO|e&Jd`bA1?ZN%c
+zq%eB)ht(A$N9|sowX|;V!dvrrf-|GuegKCd@5JcOhaDiXM)-w)_jH^31Ad>Sq?DC*
+zLVJ*`ZU6-<;7h=nDTGUhFlH1|0Ei$HeQeaCY(rUz=K~3Zod5mPyaS;v&#Mn-VlmKx
+zdlgP%gY3dVLMUUMSH2URo$rm*y0;Zqf_CG7eM6i2pH~zIF3s9A=Rz52h8-t!D9?J5
+zNtMIryAt1oUjP=EuORxKQxyIfwS?JB>--zJ#LL){nc(!&h68Jh!utQaF5`dy?BG{Y
+zj&WE2hAaBsx_RZ`EO^C;jRjb15dX*@JG?`*dJ_okqu>HxW$;)0t=Q@1r~BO6l{fV(
+zZ&uNdPrBUo%6fYKF6wOBV@jD-ekd2*;;_rK3sqRbud6XDvFxLip4>TZ^50LD@~Th@
+z6u_eEZ)W(`On<9g`0>Ykzsg<QFd#_to?CwJL+0Nlww(MQ$)h2l{F}9RMID=kDkW$Y
+zo(}#^vU_5N6`yPzwG4)na*gMk85;!2>#x$LgQb;rR1nKgn7zWoo%cw^vJTkio%6^u
+z1s{T%&$k$6n%w`iI?gzd9NbLM^o<2CuWb}0xUucfSV`w{%f@=xF;;?UC{kH=p_w&_
+zahgUKFhJ8#ayID+laYh2S-4y~s2Tk2V3u#|6?$FmjA~QwXXqzs$ds`M!G3Uwv33K|
+z&eeK<f+Uh&@J{!oaO%!aD!*d8kyWjPz4jyJ{f}bJ!X6{m3yxWFzW+>rHzv5(Migd!
+zGCH$Qf(fNBMD^7#I72z#;5W>@0~X`x*F#|$pWt{8t3G3n4Q9M-J6JaMHE!~DOJ*OA
+zY>Z?)J}H>o9Qx{5Dz8*p3S8>Xp&xK!fKe|Y(E_sU2Mf{cdsTLw{k~gzp9jB|jfWO}
+z>b^JJL_l|ejMnv%uixE2YIH{>0nq;z^`cp06lR;85ON645xJq<rAYc}*;em1Q?_t+
+z*_3wK7ULv7N6XYKA%TBN*w_w!9?yBEfX+S!s@0>6?Ua_W=tSP`4`uazuTb_hqi)V2
+z|9CQGiam<E;Aw@FSu}GW`(83D=kwqU@+gSiZSseqdGJHx&zSr7)lm|Vk}+ONLdAQL
+zDM$3*w9FGPKHBQw>IRQ<B*_c&e$x_To}UnhyBPwPP72)U5>g^&81(inG2-2<%dh1d
+zhx3Kt<M(9@gQ~=<?KJW>6L+?0C)(xTD0R`8LctNIVu}TRQFx2<la@mhb7A4qQi1?7
+zNMCHWL5CxQwZSC!t4fbrOSKSJanw3J)0BRX2Y$%V8BGRH)_t@wNZTNM@1&ByY?Y{y
+z5UDb<zx)j<cn%@EDssadqVQtZ&ye3}@9ieRqo96{I6tW*K3V>fo#W^xZHOyJZ0IA2
+zjA-&U(Ej~8bZ3Ou=o*E@jXI&G=aM~vxzGKRq&oSVYiItnWVA|o{)Qh+38Z(2{o|5(
+zV8uPORR1roZ?tbibX#e!^rJn)rK>!m0|ITi-1R3rBgQe$i}^`)$bZ*<v-TjoyAS%O
+z{eMlD{};<)Fh7=cG{*=YoY~+_jht-{1*Cr!aWt$D#9`KRmuYiAT-3JH${>P8_4tp<
+z*YQ<gL!%rgw}45g<k`~~SoAGoaSLr90c?saMirw{?5hdo+oDMIzn!}Ug%(?C|1}t_
+zq!B{zm#08N>!6e@mGg1FU;i~OV+O0)tOnBMLzS`I=YLs9L@P|8Knq@1X~pqUa;936
+zw}QSx`_9$aTQ~6q@&2YzCSG{&)aF7$^Lc4f^Y<zHofqOTUko34X%nFQhY;#)9Y7#5
+z1SRG3@_ORXhai`igWWTX*{Gc>KS-+{igISn5K-_}du9O|L7v!*%AhG}a3!SAC7!D@
+z#O|+cM8MTxy3MPj1*pB)j|x5~8X}k1*Qu^|d#F1G@0My<XX1s$>7DQWqVrQ_{~yU!
+z($Z7G7ikZuw0~);@#MVq&fYcv&=gx3ICsIL69#g+H8E4bL&?K6B_=<F*1z{pO}j-A
+zPsf$sg^WO)bp_uQ;EiBZ1-tUlrV7g(k+d#iVpohxDRc<&oyDV*G3FkE)y_?qxxSu{
+z4794o_34jRHfqRw^7olLwXbWl46PKD1%ID&dUBsLrOnO9AuOA*n)DXenGqynTgfdF
+zWFkY)krkN{$c?DQPcWlJ>*J$4NEdS-glTC0M4Y2pEF7|&y|9@<wb!&Ee^TumtI)?=
+zk4H)Jb05Z06SS(Eyc50zBhuu{uVR+(Vf)x=Bt^3M!}}Z)KN5qu`UZ~$m1)SE`kcXC
+zp6FbAWayt9Zt96Y<k9G~C@IZ<mWP~qXna3+&R!n?a$<%NeV%2G3<$W2HB-etvFaw7
+zn5sQOB*&^YJjtGvXUV-n?(_!6Iew&vr?#de(_dk|d3y}(6GJJ%wL~H5`P%h`G)l$L
+zE-{L)<eO%aWxo%!8Kr7AU6@&mlh=@$4e2(C`4ojWv9+L2Cg_;guckiou$?6>Q?g;h
+zcI~Z_WaoZ7b`Prr1jKA{Agyeu*yN(@^(`+|3;QwMgwD0tF6$C%t0s-B;Vrw@CNk#>
+zEaO_rK7p6>#Ej;$goW$TvhsF;YC+XnG_eaBd^F{Nb5+VBkZ_d4t>+IbS0>{Y=F*xa
+zEWN@yw?b6J6~JHFaGCh2wksY}J>PP#v3|DRzaqb%c@Pt2FN~U+Lvv>;goYyT)1){L
+zVVCvYK+Tk#s{QAM@WtTU(<B~|MK$1Wcz<ul^<YRo?gJYAGX|d2a<!XQDPP#3d5g<?
+z(vx1`9UKcA`4~x~KTdg=>FRf&pPLnd-**z)Q_mjjbGFT6y*~sFF`DT2RTGr11B5BP
+zj?+rM%*Pb_p2S_~>+qpV5K)JAMXtcgiE0VK_pm}5vyd#YN5em&)V?Q^_Vv4Sgb95v
+z`Pyl7rf<HC?I-jqQV>d|TN`1b6SClciPnL0ptSdiWSL@|Ge6VPW{GmD7_J)pG30&8
+zQo)T2(sSfV51ulgjc~n@1=Ukmiw=5ZyXTaA%IJyOw+qhIFTc2V=eu;OohobSd7s@r
+zq#F){PkuULtuA-YWq0LRIYRkO3M`f>(@zb!N2FUTJy^dY_Y1c^hrLP^2PH|U1r>+0
+zoQz@TC^)I)Y{AFtAGHM1R;U=fYAF3$(WKtMPd!)P2s5^5OQ2`%bJuEg<Fa`dS#+*z
+z*96TTnRSOh-z{CTh2O5u6w~}CPHi#Zy<d8Q-%rZd-tv-*qj_Y-fO4A8pd$;Mf)i*}
+zj$t)ZpW^iH(41%5O4T;ml8!G$Vq}G;>5huYI!At{m0m}{u-BfJR*_sKYul#Tq@(dE
+z_l%^q4;oW(_fb-`UXIBWw~^WY3?Zya!^&iTg%mYV<}I~H%UqRAnZmed^xav-(5_Cg
+zHB*)%>>e16*Yd|Rr)JJfT9tU;pSjxK5^<9xnmMxk$<;z_fyN{CMp|;`mL0_Pj<w#e
+zc;gM;S<3yD;vlvFso{+)b6_OID>q@u=%g}9N~ctKJ-<&%5DAPK_0EZoiJnO9LF<Ll
+z^2pH=-t9^&%a3e0V7tu07)E+%CkUB)ostZ46wcV@QRBRr1!w-Tj~2{h^+w5yVr+?^
+z6q8Bt7pur)S~J@!+B>hM*n&gHG)9rQZwRb0`i9t6V#Z@_(5USx+*0p-P5ZVNmrr$1
+z7X=6HPn#;n8YXHzYFfe}drm7wycV5Xw926;Um-arGE6CkZC>ZZgO%dLcpl17q@LJi
+z;F45|7V)0ZCI`OPSNhQqHI9hYCug(jbmVl_&>wsO*M$j*N?epLnwS$jryQ>gvN@)t
+z!-0vl!j>T%L!mag@&1k+&!UNc)1gvIZ&%u{usJqPu{Y7<z%UPps0|dYX%2t3jqo^y
+zvoJ3>L$G^)@3t$@jrE+TMb}c&aYEZkji+8na!GS3azeb^%+japj~&;ipBut91^C%<
+zhdN^;z0FKx++w`@6X!>rxLTUWByXnut4+|(Uzf_o%oaa+&o*xh=HvBZp>-*2tEPmX
+zS+_MX5nr@CZV;fSXOB<D<griWEyaq<2~(alOBP;oVbVkK2q!#m=^2L&t3B+MV~-{c
+z+Hj5f!^wSlg5_#Bc}#zfojoL8iNuVEw;Q(V(}vQiUop-TIo`G)96w5qW^_bky}E!Z
+zvLt5BB>8T((y%LKEc<TXjN<x=Vz>Tr9NszTQQ`vx6y7(QNP&2I5r_zIbMtGGFsY<f
+zEU&ZI^o^zKd!%UrYWEfc+F@0Q4+qQ(MV73BJ^4he<HwCpoJf`muKE>HX_TH1zqh|g
+zn#pKS=L&LgBncm@C(H?`<XBQSR!qAoRR%vk<nF}=b5jaNQ9i8FnpPIyPpQ3QKDn;2
+zu8@V3ry@PgZev4x$AG5e+~lxt>4$O(F%=WVSW4$2UW-2Gjw_3pE>>N~W9g{$(U#u&
+znZ!IL?Ss*YRePkb&Gp_%Sk-4I2_pJUa`5zsgmEf2p7n%dnb~3G;2ivGD4A%8=KF5D
+zHq{^!Sl_c|PhQ$(B|O%8u6a1ea#B4mqhd0a^~RdneBQheIHjTBB~r;6NIhLr)-fC=
+z>d@l>n)0CBLE^<B_Zbq6tq^UJJC{1mo{aeUY|DIyozclpLQX$~BU8)qn!J6#uzXl4
+zN0#nxsUl+9*su%W@PQ_-QOSCZt=ffg%%#=hxFfyp;B!6*s4)&p8_nN=jSM>G+&^RB
+z@Yd(*UGbkHPdAwjuM6xy@zK4948%uC9)}H=d=KUN8b-=)RSdx#z<=bJp+DhpG*sl9
+zp=ie({mJqgD(;@2kmfyvQ3f&vSK>d_79TFc@ECF0BB_C7@iZ45>?~X#XHV!UUtqFn
+z@zQi}Xa0>9s$W6SyPx8N>|)K+O@_fqGM(s@OC<sk?TMr=7^S?!z~&QE4EVbfR8Q<7
+zPb^6bdrJk?fF$%yk+0)BDMTVc%&!risV5l5_2#)+hJUCfAq%x|IIe)7Y0y$?DV+t!
+z=Wr7y()D@j1m{YjS~*WQ6&dQJy5ugZTclR5zv`RG?!rFq_r&7jliy&qn6J3P)0V`f
+zZ_$h|-AV>Sla|1qrva>6*TI5cjxMX1&&CxB{X!l;pzrGs(_nq6jQ8L^wU|9YD>}$X
+z<7s$aS)Az%p<$W#RM$FOVDJ?(NxXGMPMc=|rAzj<^whkDpk_8%m7dMog9#t5zxW{`
+zGY-zvL=j!Qn$d|H;vCL>Hhx-Gfb%IYPK?CB0x<N7dAIm^T{MF-3t1}Q!TH5lN~$fe
+zH1$bdV<<_PZZY-S$wrU_niS$@wRkPb$8I(j?)>yDoJl>>_GnyYoe++#yuE?mK<B>E
+z_hwf<K)9OHAki7#9eTqOOc|cE=Z=OW=4*Hw`MIuq4e3^?yOmNVK2OZs80cQBadD*+
+zdKyxrVyi`iIa<!X?g9Gz32S|4aq+P%JDQ6NOg~vIKHN$s<`w1WX`RxXIUz=Ljz}<M
+z%a7-!8U`i}bXsgcLZJ{v^ke*X+Prd7`8=GG(2y307P?_ZUZI3Gg!9aLncb#{b2co~
+z;=Q+NUHNMs@@H=3h%;*r4#pd;$Y-6OGqZ8-42ynZWwVt=?%j}sYYUi0$g;xG?aeEt
+zYj-~o(Z<gF=WyZGk~R!HwoXM2iqvK@9+@DXCCWc)mHBF#{581g5uT=1+rOQ$>)5#=
+zad|xj<y^^WLt0t?V9y!32)#@{d6&F+SDWMvAy=DH>;05^Z2ifGfnUM-)j=5g!`O#h
+zV~~GSUTKeJY;Y;F2%R!}xQ1L^L+}hW34Hqtc1mM(>Qoj1y)dQE#XEE1zG9>Oa}hHb
+zY&*7x(n-YVTYLg~ck*EIg?jJXk=jwU%)ZTM_qG<|b7p$B63-DBHYFchpZCZkeRQ?x
+zQ)ZX6m8s(h>w?(?<6APDW0q2fkC#ezpWJC!?(Nz-eTufZNJ$y$mKG8%R|vkcd0L<;
+zS;K9OG;9?HWe2Uzv~<|O*bcj*-&iO}t(cVCXUQ3zgNnTi4Els1l3V~wYZs;niE`aR
+z%Ow~OQL9O`IQ9DC6&Nbf`rxr^k6}NB&lLI%IB$uHyfn>CRZLFyCrc$~t`p!;(c?<s
+zYZG$`67I-tU)j!$BveWdKf#IQo6B})3m%Ui_e5H?u6k@?c1q?DZ7gkQ7nK}3li4R~
+zg(tf5of8YmT0{mbjAoBMbuFcgcbo71#7U$En(0GSYTqUCjU`yze_3IeGINyWtYRKF
+zvGA6)tXJqE)mtM5rJCfmX`{z!%YCxpKz^&cxrx%1+iX91&3>iuGRlCvv9wVWI?M2J
+zTx;SSeoK*qF&9j7cZHF?jtONsK{7p366-vgm(F#1dE@5q<;t!r#cGMuMtsN9v_@ne
+zv)f>5QJ4#SWd!Wd`m(LunZ#7>5Pitl?`X>LoF^`<C??Y_o>IPF^nTxPcXB*0H_#G?
+zN8WFEipS`?rR}jPPSMKE&_f&!7!nyh*f0aW&5m9iO6JZfB<FeUt}@B?z@Ome-zin=
+zMyZ|BJs5_8J)t{62;CEjxt^<0Q*ALy^|GdnD01};p^;}yg8IiH8(k&4{>inU4J)5u
+zUzzZbNBQEEwsT8^Jr8nTj*Xq(5}H4_Hi>}lMH}UIXW`&ej&iLqc5Y;XLgC$3XGJ15
+z(Mq2bXVoRwj`zFEc<oJ+J2@V6QVI!c#m$Q&Li-_}Z*w>cyRbf^$1;xN+a)<3T)wWp
+ztggBI(|vWes43%UhNtFbiN(grX%jKp>BM!4O1v_*vdd}|@h^DaMT_J@h15Z(diJcB
+zMbwOrJRT^@FNoC(F^*Gh{VGG*yxvSa`)L>J!dOH8*eaX{8K*1@^275AZl_7rEFfyp
+zT*pJRtK!&=w7{+)@$4~+hY6Q1aRaM!!jopxnWb=_g6g{8yg;{htaD~|7<l5Yp>&LA
+z?^GL`Ko^%!>hxH8&i793c7w9~)4jtHP=hvE-y%Jt)V__+t;N}uIr-THzaeoZJ6@24
+zahTu?O}E>G#Xj*o)}4y06;3K#g+e2n(8()yi6|HcPs)}GB@|C|iqq&ZP3-azEd<Sp
+z6R_LU>_Z(gvf_Zj0-u>E)956D!&aplE@QW8iWWHMTTajfQIZT5KH0fYSX(#`kKyU~
+zz|*<Gmzp`|DUJ8usk47h)^8$1(chI~hzzsW&~G|h8TbITCFo#KFl~2)q2Y`{t}z@L
+z%n<=Y1l8-;t=js+s6L9qAYH$k%#8Iy6?)5dn2f)%#3L2&Q+l2B82t`k{?4LE$~@QP
+zc~{^qCEfl&gnP~(^PFa~Y1Zbe_UMKQo$^poerp_B#0udPM^ki9-}t>YZ6De{E4%Gu
+zw^$cB%ASl<k4Vyzo%PG5@agex_`Y@l*Qjq{^cHscq}T--x4rYx)m_L8s<EH*mZzna
+zJl4P+L0nG#ij*`euy+c`BG$Jyr|aw_Ijdp(93H90nypeSn{ms0c1Y1HrumNOyW!X`
+zWaVqoH*H?q1*wE<=M}IN>y**$P8)K8j-|&Q^wiveE3T-IKHxC%GUt#QbKX#5q{^OF
+z8H|*dqKC-_j2JGI`)cQJQb;YFajgdyr4eO%(}S2_3FO@2$KNZ1FOkE+`EIsrQuhQ<
+zfmV+2D$;X3zuT9pJ^Rkdb$Py7-|bqe;XPJ0NGpBo%g&N5`9g{`hI{y!r5<mv*Q4y(
+z_&WkJQ5)&dG)xop@+@4DqrqEIX;Nh%yF3~8)V84orP=cIsx_zhIX6DbC!N^FPZw$C
+zDfi>vUNb$fPcf{B28~5~NZow%f%yL3#Kwl1%#Eb)AkUh!u%}|oEj;Y{8ne3PpDP)`
+zje2GpIaznbWQJW#xuAT{$e0AV&iKGp=Aaa*U5W7t(&&k7|AOlFItRrQjAVE`4o|t)
+zS+Z7IUAQZcJt^dIF;1S>xgw!)=zn4srO0DRXS-4Yk=Ot(4cVtc&qo4Y5RE@qtLs3}
+z8A#*(9BBbTDD4Xb?^GLwyy+>ab>Y-q-DqiNsw$4>ToIqB6?n_Pm9@iqOg^tTpwFE{
+zye@K%2`OEZtlv9fJB4NQ$8$&V{+Jf+UQVj9=_B~%^5dpl{rZ=KnKk*{{DTY%f6bJJ
+zmn{`&CDurRjaj)+#!mK@5cAmEdCL`J%gI!xa^=BbM5L<k-bzxg!Q`fN{vt^!rWgfF
+zy^>c09@GNzr@l(sDwfK4o;FY98B=*?Q=f#jc&V|eZE*d)vi)6<i_ipA>bjINZ(Ryg
+zo#WohVhPkC;6^Bx4WakNEmvVctlT@L68A)>oL3B>1Io!Jq2w@EBk<Z050Uj#C7DV|
+zbP5UcIFeE8(G;v-(W&4M56~p>Y7>cIDWj}ezGdKu&L+|ms-RFhbcJcJ?}VZe_9OTJ
+zQ#QOR?nPfkic!h04V3W8J=`Y|*P8^RTdKx#KU){HpWfTg7gifnnU%iV=AX)4$(908
+z<rjS!D8c39HB3Q7KAYULM-Dk`$%6Aw!sW=HRl@EqzSGC&rfHusG7{?YGX=kAG}#B?
+z8aO@j?}HKLDdC#q*7L>f8>}2>MjXE4Noh6BOY0Pq;QmIW9utcDhH)m1de$+;OmL^_
+z+!w2rfwrZgg7p}MTya8-gi2}?+`NN!dXSl%5UO)I=VhfB%vTA53?`e4QBrD|2YAS?
+znN4?CPxP1^j&-*$)fnUMD)x%=#oWhTS%e>l93BWChc|o5+qP<;`bwF3y2>_x?k*=i
+z@D~cAVY@9#9n)Gj99Y<MC$Rn}rwy-VH=nREq%?6)F^=z#(vkSypOIb^|9Z5P(cC*+
+zTq2;MQH{1XI4ub)v|{h<Cf2^1{AgYB6VR)|`>LT&v?_L)1Dmapf!ke6%UF{6dxO4s
+z+R>%SFu;*^k;H=QSB$3l>P@n?W4+0@fFtXT%GE~_hI2l*t#4|%SA4EsXrbr>1^P00
+zaF~wxYk+&TFmdPJc0TmP3dPlBi2}?<#x8ex@#H8qlVZwi-O3nC=E6(D6lw78+5)5l
+zX`)Tm<>!={MGaw^xI^M(b3jLHSC5M9_Cj7m52ZzcJ;tnm8)xZQ--^}F2PQ@Nx|P}!
+zLm#I+#8fn-1UIo(Rs|YgW1ms567XJXTzl2Bxc-`dc}+HH%Ejlp$K9tzH&(90waL|6
+zgYmykx`N3jbV`At3V?<9I8ksKhDbFv7$(}6m#U}LTOJ41*Hd>gx?S95^(m=*$}KUU
+z++qceP`sEfNjka5FxW&g81&KQmdLRjeSN(5ZBezcxcYOsevJzNhq2yGx{!6~u{Itq
+zY{jZmGE;<X!g7{wCgi^Dp&H4f%s(+!3wk4^w8vV?7s%XCe4+{BJ8d*^#k{sYWovR)
+zr5x&x9QS5Mf|hQZ+W}`X;gF}n%`Vs@U{<;ZJI)z$=iXm9go&CG<sZ{rwa4Nzk9peq
+z<oeVtZsOT!Q&DIBHF#sMF}l}cg;r{i_>R7ZKQ3OKQ2GK<#R5q~Kun={_v+S>t%&uh
+z&#h~=UgYn=L>7sxzpKX>8HDwz;GoqPdXwz+56ML<tnZ3@$re*Go;hlS{o4syslEM1
+zn%En<iHRsOlNx`n{?wzja1EFaqIA|Dc93!hb3GcSKlx+8EBg`&Wt2WrMLW)*(@*ei
+z=XU4S!h#oi#OG9qD-5o`LW)^87{p+>N@HU`MxsjpK*U=v#aaz(gS!JU+=iQ)#oe0o
+zhg*>e!3P+b4Pb*Ifn7`^DDPQ}4<w9U2A}cX)XWH6LiF_?;|#UB2rn7)y>p*ugyP0u
+zldqN)?(^Y=g*V{tfppMprCPw#3dRN^q>%~zmS3E|>?W!;TN$F4U=$@@yfl?4=%Ra}
+z%%&Nea^?ifnmCE-MUEgj{{eF%?r}qj>viqgVJyO0npP$<IKjhM^ZuowGjn>zO4Jy+
+zWOTRwoQbRL6$i6c2dymoh5=m4cS7HKS76G5NVJenFh>lyydqms4v`Q{N9t3JN{5#}
+z9$B3KbF-nI!f>l$in8k1WL@Cja8}t9M06pJ{d{$>!eQMlC-fHeb!h7sjW0$vLaCIm
+zYPUOWy?vWWx;3ao{7n)v&U-<{UP+%QBeC#|rR8D{z&|Vi9-sG?5<O{6<V3i@0i?d7
+zgX@Z~UF;PXYU2YEBTeF!!p4?j(g<m&dzN4LeyLFd#<R`qT47K1bPQl^hmBHx`>RO&
+zNmi$;kXK-t9A=~e?BHx$k#I3Zxd8U%a8ncdF*upQF<6#wlci};gNp5Vf0M>~dXIsd
+zMd>spkKh>Q1s=)ig=($^*V{lteCgB42Ime{kwD<6C6(uS&(*DwHSzL{J_<S64bO*j
+z1}+-bkV)(1ojW|atU!S2@#pYly+uFHNrBxHN%5G}kx)ySf9XVz?&|!7E-3bK=hMAU
+z)49PKHgp9rgMMymmsVm{A)^(hG}zf969iuR+;k^DKS5B)rd+tNj@Q0#zaU<DvH6zd
+z@QS#+O@?t;>lH>~PFeGM86Ue(FcD>OW^$IX^ke7Z33IiC04-FLu5~oHTjKPHy(fny
+zeY{?*H{<!-<y~EF?yREUyo~l&K>-pm5hH@NI+U6_=Il?jCiGMGq3@ZCP5Nk){4G4L
+zR_4hn*y&2?seC`Br{axd0{xLykthgq8xC3>-rsv{72-8w+YlfL+U!UNU~&u7uQIxQ
+z%EOvluCLv#ui2IH&2F}|QhU8*zN>65EQiCiM)citlFgdnKT+4i7=^?wjItouTS{q}
+zVpYG;%j`Y1PID}N*;QUrzIKG5<P(|Bll=Keg}-o}!n5fkMvmpyqljeOL@^wiws}dA
+zBd-jzJ7#)XX-u?f`t-V3EtT-Ez`ew(A~4b1S@Io$DxJ&R-$kmEKk`Vh-Yka19{Z-Z
+z1UhS)IWi$(z(`mk^fI(lK}8Q>Dw5u%Wf|ENA$sKS2W1m#S1S~I#d|(YDH;)nNn`L9
+zIf+2Jk-@~PCtk#PO2^76s{F38oRM4hlV{;{#<Pa__VEL3zF2@1)Xo<-tFWQNI9R}T
+zzraRwMHAY1)^Vc}&mffDCq;U<2Ce{pJy;G?7x`FtLZ3cIyv8`rEXe<rXK&y{x@`_4
+zRZX*xsiqp34|)m@FL2o$xEi#mB1yu)$5sx-fIMLQ-r96#pKdP0*$;cWPty&%YI)lt
+z$tG%Ac|Rb+BDFyi@~<ykeHE?@c`w%b78GNBcanc9i19Q>%!^3QyyMOfiRRHeb;i?z
+z&bt#YUuc1#hK6Zvj+pp3H*oVX_{Y@}FvOjJGJoLYv=>&iHQPV;c#<YssMfv{tXBkk
+zoU9Yp;MibN;AS&MF?oUniNNc@AHKU*oZ*hL9;SI>8=g1@{R<{;Yv!RaZGuQ%7e>lN
+z+M_f}&~2mf_T~uVoi?<-e27D_+g8R6j?JW>LuUZ5vD#dx>X|~e+g~28;XC@*NW0qL
+zx*rhyU`D7H9!+MA@}A-*^yVwb-F_pR`B<BokK7`ZwR<mAg^r*~tE+?x?HV3#xkVi*
+zsW_eqm?xpLAQzgF(}6_yCvAHdNK8y6NvhJv`#!xpkLRhvz3xpp1k6^M_vJk*SRhE)
+z<K$G(Rx|UE<4)pShjJjAq_Q1)31VYV_&9d_9kn!F<1duGKV|eR?*5e3Ng9eSLdd*%
+zn(unMiSIDBaX@lZ$SZ_Dq1jLt(@;gwBcy)m*4Y=%=yjsd!j5#L8aCQPPq!1_StE1^
+z6IBGS+aw*^9muq9a@!QPNb{-t9NG`&q)K}Y#jQ*VK^8Q9<`f2p#~Gp|Ha)CB0LJNc
+zc$C}(_;6C*HuX-;1!5krcs(8$pI^Yc9Z8f6CC&ChM@GD0X)u`99xcenJD;vmp<{U}
+zC1IB?d2+OQ#kEHDz+u?kBIOq<0}c6Gp?;LP_7H_v4F%8?#lpXJB}ZYb*G#KYv*$3s
+z(to-|B6OgcfH`VqlTyv@IqizEIzf;x8cJDsI?~xyj~-M8yDQpj`m$(`ToH;%saY@P
+zTPto79uH9J-qvq2;6D)I#hhpymLVKF<C80;O&CClH);r0p82PNNOEtax#+t07Qoi}
+zl+1KWF5BM_m@4aJb+s&SiVDQ)+<Z&c{bbEvE14GW`g$qc47Q{mN1asJDi-FvM6PdK
+za2>)Uqlt6ui2UAx&*jrXyQnbfQlLbdm0}>`P6*F*h0f|Sn`i=mcRn|T7DBI~=HgDM
+z2mgwdA6E_3Q2qjytHdFw`E542fXBH-Hw1qU-BQ6w#r=gcN3Nl@t&D!xlz0-*ciFfu
+zF0Hu-d_UT2Xwc45s;B7CF|q}l>@|z@(VOH^M++Zzl;k#K1)$i2wmhmkSzG}XoWPr*
+z%8on5?1C33xHX?{Hl1s>N#HaP_d-)wAT>DNS!au@OHbkWrI_i)DHaLvog!+wj4rua
+zWV4mis*9=hhaL0BREoaR|FX)IfhO6?rB38Q;1>TI1#X_r>8$w7EqH!~EXD|+l#ib`
+z<wQvemGLStHEK6Z2Br_(M`>E(<zoI4O`^HDBo1L(n*$;nXGBPcW?;M=rYE4!SYInX
+z2elyZw#(?6f?U$%z6GSvA)-rqZ6c|$4_y}=5uczW2NdOdyC!x4t3y;GCF^iNaS*4#
+z3~q|cea|GZ*<HMNb=+F(Ue`T<;1AT&FiKcrSzBRoWDXf91O_EY3Erabf?N$~cBXD=
+z=4x+B4Ofvr#$}VMqXi>(CQP`_14HS@=c4ROS9HeE#mcwY7(!VEV?3Q+vBD;J#5dYg
+zoh|3aSm}q#pcPxdG?1T^?(xcsCjR6h1(UX(S5Gyb*sA?~LVxD`)`H^Ei(B-Wc)pkW
+zw8O4!BY-JhU_qLGLz>PC0Z0PRm%)O|orQe+LH&SA7seYOK0}n>?GMyXpCUAj8?!{-
+z6LFf7HRx$y%uiHGoL&}1J)~TzcfuG}2Y*q8hW=e>mErcd0IED51}zlj3B2IPm1oXX
+zV8dj(da8$4m^^1<j-?{lc*|V%cp%$Ny3g;>zK&dp&lkLlA~9LKV%!9pOC*iui0Xhx
+z5jT(5ir7rCIa)?ntSwjNdO8gcCI#M`kXj=eJOdpcW#VD7lyjJ$qNn;sbNGXaBq}z)
+zMMbm>2FZsbk*c^<!Xb<(C65R<qYOab2oioJGiqI7?%~XG3aV3+&nFJAnH2YZ_vjbm
+z<Z-6TzQ%0~9l(0Q!JvW(06P%?b~Xcxk&Tdfd)2w(d^6yx$R%IR?Ymh*F6lKAO3=>s
+zTkBIKty3hSZ8oQ1oo4N=4A(^J)I?UTZgO7_ba9KGC^<hwD9ImBwWU9z)CtcVJEd)^
+zgNKteacT}1DpyX}SFl`HKds^du2qQn_|18ky(ju=y_hmuQLa8~PC1#HOXzFE|G4h(
+zp22#!INsKHG_KVqn`BA!er{eA6mQ-6cO`-+yA60aR2GZH{%8b#KmPHsr{lQZaE7MJ
+z-x>JfW1{d30SA17$9+@wCUutZ#Lz@M1z;nM;Is(3n#D3PUz+~N-qBJ_{kA?8C5Iao
+zmLkVr^E*{cz1Ub>#WxpT4w#>)-(NsI#L(=i&cRG;VxC?3Lm)MQ?agyeKvb$<PpNOS
+zvDM4i<Uc~UTz7)B*WfAb`v<8Iio3`_1_qzJIAV64-@DK0Tu}t_U}$C)V;)Lp2J{9M
+zlkZRICwgs}MGnyg+lqLyn3>*?jpKTeG@r7^+Q8v8Fn7htyiJpY8%tYF(1g~%#7zJ`
+zKld3XwH^+W`j1mg<T~MGF>kLlGCny*&{J;*FhV_XOxxs@o;h}iDN0cdjMqV@IEcrx
+z)kK^)ZdS3^+29pg_ICnwPUN?zLX{^iWfIRi7tBX%L&M~n{)I45s_mQl%0n9M9XeKV
+zVNEB8zQSI?574Gg%rlkOQlRs6<^)nGs#r==!bwNr55&h!^lY$4&C&^{?q(4(Yu#(<
+zIJ}H*JOB(GLmTIg#uKH1Ru}Q?ii2n4=+u#(8oUAjDE>}G`?`xhx~5%kDx7>VZipxl
+zMB*qDALCRbk&2+iErd?ocI_$5Xfs`3w-kHon*YJ++zC#zy{0*l!6ss6%mo#|_^Cb5
+z{B*DTAg-1`NsbI$(ek8`f!^Ur&7{+)mrSPe+lNvS9V=1Can(XthdtWfv_?x|<k3DN
+zAcefaY^X33bv@&T;NhmL_V`1cR|xC7u=zq*V`tBf5ulGYH7S(^!lAv_d{x2kK#E6C
+zz^h!*Pu9yxT~P32)4af2A?B#ovvex4PcWZ;qm(J~R*?{ZJPy;Z4<<2$cIgCf_^O>Z
+zuDxm}V*mg4zCS9>GtYPSbkFu?wkPgv+Uc>=m^;%nj7cV$h8Ta~D|cr)ZB3$VRU{hG
+zNfTj|R816#Aab{z87FO1XF^PZ2<)~h6%-QD7(rkX+c^FJwh};8AjT-==bMN?1d;nC
+zO?zkVAA9aSXV2Na=WLGWBr)dYec$JKpXdAi{CYhx0@XayCFyR~HG-g^@D9^`;tu_`
+zFvuPlKHyun8|rtaNArn)Hg1#aelz1LAlbn2`On%Nd%`6q0O1Qw%BX<Cog376GS4Vq
+zj9SuYML{4<>FcsXK9^fQ8l}qSmwLN}X-5#RysKnom@aHD3iS2UDNu@tEe2*sH!aks
+z@N{Gx50dEm0U@*C0+tr*0>746V%7~D`U0D;Cm`OX$QyGEU7;Y&3^EHzlWdPEn?@6q
+zD9aV`KyAkA-{oq@CO9pHXoRy<2m*?eHrjjYDiIXcXjUz|*!(;6ceA3<^3mT!|Fz2r
+zkT;%9<4hhqZV}&fV(5mSjS{ka=tGD{V^(He@xNMWnr_hT%|)H&i4@NWuG6Py4FG{5
+zMTUn2F6_S!at7kLgdxpD;f*Prw<28XNj=#=qqAT2l8}l?<%VDv^_uv&!knw-hR@N4
+z0R?x3d9ZKil~Cu72Vaxh@s{@LoJvziCK3H?(&dr@uDeK|lq6Hg{aj{&dAU~)j1O1i
+zf7xv}<n8FMhXvcooj{17CLm>6aK_EGtsoWoJj;?guhupY20cwAUnUjfQ;hKlN~A4Z
+zR$@42xDQyg%08)k&gobbuwDiGypte`8)Km`RvoW$Xuou9)U?bfVj|AiqxAdnS6=s8
+zk~M^P;<aPWABN(ui^C;B(z<9>j5-BQLKxPF(ssh5+LrfN8>u#R!w_FHzsa~Nw8DaN
+zoQq(PiH48aW%%Uln$VdXpRp3H8*mH`d!*IG&AUowfv)Rx0skfs4`Qu+W{;Z7v=o{o
+zqmu5^1@ldnhk8TvYVlC(Y*<VT6PE?BA6L9)t)Ig-nI%qB6SLd7lTcDQ$Bz`;Fe@Xc
+z+Q?8@IU^IlL#l3geBKpkDC7~z#-MYMGgChkc27?<6CE*`IVE%e{|Egqi=n*e>|v{T
+z?vgB!#OxYkSOwRm@nTQ?qhw&)_r)iK+AkdE(3uA)gLFkRC6C|xaqh*PUw^p_05(7U
+zbMD118XmB^_;;^;`<=Bw3^4upowf^`=w9tgEr;WY7c-c8=u1x?0&;4ut2KJ$>A|`j
+zo>z9fToL>1;iR`V=*C5dqkKmNQ<j#f4}7@8Sd0^OfBV6V=%1b)-!E_e$ImFz4RVfJ
+zTOO#5#k!oD*gun&1)!Fb0Mqr&d3HHm<LtV`t-v)iIqH?#c&r(zVBV=Z)Jtl@=(>QY
+zCs+ROLr2hO$DJpi#s76*iD|6Ved0oJXn*CP$7-^qtW>qM2CCX5#mmq$kU%8#S+yt2
+zWF61K%A^{}Wu^r7jHsC|LA%zA2-ISA_A9PP4Gkk<OW+=V`w7md1MEWk<Hm0~jy!j2
+z{PXqpgX5=%p9ma&qgJIU<h0N=yH1QqJcIUS6?3vF2k^@}p#pgFqO_^#TLm%RD<L}T
+zXf+1;_Q>JK<FHmoX8)L`;4=q2(yxzeTaalyP^aw%l!&J;C3q%DPxf@?BmvcOnLMAK
+z-!a{Ykl+1;kN)}580&B}cfI=18Qp0T$Gj&bPL{YAaDp#QjZs2Fw4U4>xyi^nDdsO}
+zyi!U}z)LVEV1GvNQeYGM9CzgnT<!f+GQg|P+q_cxH^Z@pyAa0^GjB%!=fwe;o?Z|v
+zN(_S6?2qkCP?NruTDRC>30}Js+~+VAg0KZNleO*L&7bg(48hW=KPB_Hs=vKtMs)ny
+z@wK;q4IEy5k{PO-0w0e;aHk##LM!lOyA$^XOxkyT5)^wb`P@}x(@c!WCbO@Iye3<r
+zgrxR<D$z_e26OGXSYzL0;jV8^vqikhDQLHB{PFtKOd88<rQ31?G@-lix{%3Z++;v1
+zM&=Z341mk=h*8HWvc^2KKH5{XwAm*XULqxX8bDIDVu>!Qi3k^&Eld!t1Kg%>j=qMA
+zh2LKiJs58_97fYCm00!_W6n4K*yVWeW^>)f#N*n^??tsgKwBj_{!ejShEn>?)3P&0
+zX{p<o>PkAE%D*Xy_U5c-FYrC*`N_=jls1Mx?K-ZO#1W&}($z_1^Z;v*fOjB<Xj-(x
+zH!X@CihUw8!R99cL8VeJb^61B+F~_#w}`n?8_wk6T((SjLpEAHQ57cy=F#{R1OM}^
+z{gvV#R+r`ydj_YE&Mj?^_LW=F_7XvpQ`O=u$DG?|iPS$<-7Cd|EZ$w+FcbZFM8IWR
+z?A(zDrgf6~?55A_D_hm8;WbjL47<-}%5jAj=11_r1L0?NJBS@4G0y7*CcHULW8SV8
+zBNu^<#Ix4*=L1!KQ<J_SVDuU#Sm{Qu;C{+M*ZLsIzu0gY72nSEzc#VPSVB8J+e7sr
+z&*Th$z79%oUhnFVW{mg1wRC!zK%)L6*yn7-evY&#-9l;e2k6H^0XJDlgm|#iF!fH~
+zZ}gMP5l&V`tmdj%xRoktGWVRbOJ{_sxHQ|RP~Q^H>F=xjb{2_x0humLLO*me)@40m
+z<+|;xY)bQtVY!sEmGk0;>K!uv&9KS^w+>HzoUVvQPw3UN6~HfG0KIDkPmVw>IAR~U
+zve{=t&xS>363s^Vmxp@$A)(9)H>EN0WBfqu-sAUe8$UBXrx?un0$ZMDt+xcK1wFCm
+z^k%{Wm8=lWia^uxL7<HDqHrpBmtjyB234Yaj(`0??RgG67wpP15RmvAoO#wg^k!i4
+z^zfU*LUT<-!gDJNgTzdP4M1C=*)&2Cx>KWh$|zdB&5?%pN$Z5LG&p)m&XIA<QNulU
+zUUz*DHNS}Unv;2-Lc#cW2h6<ySPqyoeqPo1fnuRGe9^7ylgd34X_h|Q3R6yUV4WkI
+z`?9alVwtKq?)L{`O)AHfOxUSE8UdkDt(?EO@jTV#;;psZ-s23E)QVKMd6T*F7ELhR
+z6iI*0<pM0Hlz^y$UB%1Zky~uLZ{?%-!(Cbr#l>~5TFv!WIqnoqryuWI4m1P@L1=0J
+zp<qZOFA@(i-U}Rb^)jKu^$ZNX(c5ZG_1_9&9<66}_IIxNDUywC=e}<d$ig=c`A!Ht
+zyQ9Os_J3%P|BXi-$W)d(+skFrIZLp=rb1RC1vsHRSQJZjfVvFm?lRHij=UN-*}Q1)
+ztQ3YS+3%ze`*nd|%_u-9FN}Q5((*FXkdt#HUAAQy;uBk3r^`hY^!K6V`hLTet~q})
+z1}dY|mh=(BC3NNL^*HF38QAQlUGel>bWLEto*upz*(MDCOpJ&^7=3oIH+nqGmKjS@
+zqr*#%z44E)0tN`+nBP4yF>O@wA?y<O-}U{mRO*efWEuW~^Nh{KgoYRTOJ`TuDA6W`
+zei}{P6^>VV*2UoiK6&I^==I_8Q)JV*t#n0UI#yhxfBeLY(X+R=e5RM-Gxmn4`XH{4
+zl^+&``oD2w_{iZpr6Cv3QaREs#A1^&jV3?mEXTR}s)|jGH0IFeRudSw0Xm;7K!U#N
+z!4>cFhW2}oXB@WL&$a)wmAXg1b{6R+g8RXMG(FpUdEk^!3jCJ$ly0u$5s%dA>e_T6
+z50z89dl~FIk{eUIhGeyD(dU|mm}Fj^?{B5c3d@6|^ABDI4O1%1JYCxzlhE}21;sl1
+zeS0=P#_ePgm3DXMC3+^EP3w0b$y9KIkv^NEo_)XFdP;2&{n%D9X@51AlPK~8_eRR%
+zTSOZ%wR>ckV0S3e4WF%Qtu9r*nii^NV|>BvpSMB<+^Wt7$_gA1Jw`>QDD=s0&ak_4
+zHvs`M5eU}3Cd=IORG_wjdT^-)YnmxhhN7OipB9g3*2}6YKvt9dX!_S!c%b`%{;65$
+z46HsoZnWcjl?K2i&AxI>Jpm20;%_}MSsb)eZ}ZL@N4PC^N7hufj~^NFuNZR*7g((U
+zm_Y&xV5(&VS~^>7W=w^3qkOWW0i;-#K<2RLh*e7t?vrc`zoiZLI&06pr*LJ<FhjdV
+zcbjUx%OF|?CHltUj^z{pUu`gt3w!al7v-4Pwq7kOQT*hA=pE@NYAE@2o2QcWXWF<y
+zu}wIv&kMbU{uceoVvfff0Vr``@Xb<)<6MbsZvrWIIWJG5k#|ywGke4L4CKo)#<?Bs
+zTzjub<HUut&eZSY$iW<vF1$4~K+uS(D5%hL7FBv)#>kbsDvBxC#c{41yr0gU9PSZo
+zJS=8G{8Zy7^HfIp<lk$wr)KIuM1Mb9sFRf_0m97SyUFi%_!g!YGBROi*RE}-iwZc(
+zl`PZmSmKdi!!q&L)SH_VHGWgl$G;E`93N)crn>=f5SHufV*4thIp&WL6H`DH>fbSE
+zx~R2`{ZNC8{>2RnIZw+AdJ-#dmGsD-)w!IbqTS!zwy<Q@wQzZGS|{-qnm#2&3hs`l
+zyY0UqMO}{>17onUTw#v13>7cafLMVxWiaW?F5UGz9|iB$^AVao>`&g^%h5?Zx$)QC
+zsPL6#Kmp4{D`n!1k@!}pRJ{xCA9)+ipq$i>`AUpb3c-Tw7nI9sn|*H4!yyK}EgKZ%
+zNc7dt<rHWKtpdq@-w5BT%Ri7~bOq>Gm6f!yhB!tncbU65`?n;HxQ=`DoUENa&bptx
+z!9N+tv6=C0nD9lWG<+GNzY&}*MU@7UM~9IcAy7ufw}yH8GnbQD#+NPfn^xL^z+DEk
+zdTxQA>o%TtQdaIvWP;wr8erVgw)xi!`}w|V;A~`dH#$)BCHFK?*s1!KNnHuh6K{EX
+z7On#I-N_Pzrp%~0oOWgPlFcntV}0|wu8(He-DwI&Nq9LKsCd+j19>*mB;0*+vrKFU
+zmrJKW5|M5Ys~lCu>s!>EnF;nldaVC?Yb<F+Wn~;Q5U6zMWh;m$@1z0OSnQi(&D#i*
+z<$nm}mR!Ne*H+1Y=ajM=*GrcS5XA3$dpR8|`eXDnegEoVcZC8Jr!4C@_%$AGNN!My
+zg7xeUU_Db&N){0h^y3!4O>j$y)-h|`gyepN$Z1!U`-tR(F@bYM9^27-<G5&=B+-D<
+ztv3SteC38sSr3>y=+GZBrV&-CM2<`wH(*3#s*yqA9O#0&!0AHjGjs~yPctV-$j?CS
+z8f;*<SGSPGS>d;msRf6=VC4?|z=NErU2%2F08#K%_X?S?@acM@e)o30K<4U&r5C?v
+z;eA$j8ZFnIYt??SW?ffFt8M7R_S3E5Kf){O{rvjrnG~-2cZw>FgxF-_Mvf5>oM##o
+z2siUHSs=v6-*OT%#@5MCwt{Un`Z&C{;p!o4WwVtS?`ka}E-?X91FzR3tLP*4LDvZm
+zP}Ma(^;m_%AND%_4ckK(8)J=V2xn0I`EY1qhhl<Fh-N6JZc@r)WznnZpU>6nj&bOM
+z135qN02zVh(8-nQHw}sw`<u5nk1vQpBi0Mn0Dg!r)JQ~4SseD8?Sts^RO7k|$(&!@
+z>jZ4X>v6vz6ojm{XB0A#$2eMwB_M?+VHw7x5b5(*3Cc_^7XE@eY_YZUbvKoZHxtIT
+zPSy*ecNy~3lNZ7UYOaI{B4%!6MzPw$9YpU!+nvoV09nmkQ3qK;@{kYxVWr1fI&Z75
+zT>V&8S^$O)%){qogzhE^%u`|}=Sr?SFF6YA+HQh1Uzud)fsL=~@+!$P4fwHB-49xX
+zOBA4`v#^z0Xk{2rGI%_0Yg{oI0<^U89LInh;4ef6QCFVD!Sg+Ay7{aHW9<^ILJzb5
+z39U5BsvzDd^sSdMSUsDAl>SLj_1LmZnwI=CNgZp=GrINK=)Kv$kkH5f+r@)d4s@(t
+zyMiU=oH-Dfj5e(pgQwI}VtST~x?j{f%aUZZhSPe#$HGt_YVx1fJUKC3Cq!?=`lQ*5
+z>f#KNZ|Wo33Qg^1SCeB!;GiMs=Ky6Y!vIelOB7yn9VA5F(fRhW{JsXZ94~LJ2N<M4
+zcBn3|SA(lf$4y)XnqevUxs0O>KR|X?{nqMFxk{w1^g4G+Wxb%@$55M>w{<RM2aH07
+zGV?<iESkYZA2KLqE#O92W4&d49^He`CNCBpN$wBF%g{O@YZtjfLUg_@At=bc329ce
+z;Bs|gRim!PJu%oevv81qH_PbsR)21HC8M{o5TeI-m>BF-LdmN^zkU7S5m5cCPWRy%
+zH{YzB!?})7MKT_6p(?wrgw`*`7^dA5mXvaa^V%KyjE_I?Yqm>+1Jj4IiL+fl`nTa0
+zGg0`kd=F@Rawd8*R9uSrGzlHZMPTLj!uxB;6_X6q`NlBDa!`;r)FnOBHrZ7>Ol`+_
+zmm?}$XS^-xV{V$_FH9<y4seYfNzP*_9bYIY<tH39>J{R<@2oy&VqPJ58osuHJyG>u
+zn4L$aI!Hsu<$gw%)`P-U_g(<@21_vFFA+=h*}m}<N@odrA)HIhxfL^J((b$z{;Ha|
+z!!iLvTrizZl^kKG;%+f+GluSaadj0kF~CkB&6hG8Y45~J0@RDuTrUl%9?9wIbd^*=
+zov8r97U^U$aKJ)--xLE}GQcZJ6k2|X$3Snzn#$3iT0abftgeqLqsvM>E4zlEi&`Hv
+zoTvXbU{X#t*(z!M;HN4>0Tn;C#D-S5c3|kn{iEr}O=5-M;8gU;Y=vn?h<P$_JxWCR
+z(sc$|5!#adzUK!vRP-&sqoM%M+FfdSv-xt(4XN*_o!l-D5G#h$4U~$svAzM1&1A*8
+z<P_fZ;^n@=cE#rC{Q2sn@_L=;xNUtxw)x$}tZpXD4P#k!x*6oEqyfP}MdF|Ur4UM-
+zQqC7IMS<IchOKC*m%fk8hz^JfDz4<!3+q3b<CaKX^)5BJ7Va80%)0WHy1lS-9cFcZ
+zv<vy1XG70tvVa;UJxT%RFH%r$+5@%Oi{0#-&}@Jh+t-!otVxC}fg?x&E5mo4HSxw8
+z&$JO3hjze`VA_!yv7l=jloCJzE^EyMwO2ooaLi@i;$Dlu>D{95QQQ=oXA|bw8Iw}T
+zjUHoxbx&}AZy2m=P4A?0-P1EjUiaoDdK#q+D|Jg{Z6#L#nPHO=Tm9s2l~5+sH=Cr<
+zqaq}DX5|!;@FH+tFeD@opwGy>-#m8(P;?j~^W1|DMInfwAMnToHxxC6K*bfX6D{wL
+zba{&0cO~<mN(F1gpd3s&_jAg$V>$-`>}Q2lEewwFBd|*3Gb+loKk~H?Ttdwag@7|!
+z`0i<CxMhjfRwI%$b|{3Ag3Ar)KTE%dR$2@rhe>e>JqRL;us%&)K)vAE$9Z)=7fZV#
+z1=$rWf`VBaryxjda<=pQ_7VH?L7xZUNBX9>OUPZnJ5Cp~oFJk+zvE@z_01uQz*D0=
+zY#DnA%zB^=7wugx>|D;`t^H$|b?>Rg!5Ll5Q6*ra-RaoQBdj9p^HdcZGsIZ)`ulHF
+zaktdJ0?bn@#UtFD`wE0rgx@n9OrsJc*D;k)rh8N=hhr`w=*~D_l)4im#z2fw)NJ!s
+zB}Jv4?}pz}7)#rsMDEVAw1YMDiCN-0XSgNpcwi`JL^vB1M?ioG=+vb0B}WoVV}^ru
+z1_#IA)kxK!VvyrX*@~6lKo^chE|5Yn_~Z*f$QX{BX5WPQ(MJ!Sw`~;4Bl-1**~YNN
+z)WbFfd}cXiVy*m`$Nr+FuybB8_Jk@U%}zz7k)EO6nl@SJW1*YJ5N2liTwUc)HZ1`5
+zpo{=t*-5rVF}7}F=XZ^e&18~dj~R+(zy32XvrvuGPBxmOfG091dxGwT-GoN9AwZ<-
+zi!JSB0?A>s=p&~+<tD@Ao^PI~AiE2h=_ql3D$$S5X)gjyXeJgf+oF;I0rj`|)aBG8
+zN{xK(Q&0a{vjhY!z}6>O1YDLtX?5Z^UhU&Q+GY93GCfl!A+To0OIum;z_e7Yn!D?N
+zt^-^uRV`P#nUd@1gOQ6iyNhZGY{jsyLnitqC?#PH<3nLu(L_{%N=h71ZIWYya(*rc
+z@6ByQU@v+Fwty;f<w4iK$azGfGpNXqm5F1#`hC7%bP{4vx$6fsq1QmQI%uz$14ZZ^
+zjjVXN`Nf3lmYnb)kYljZz?-OcE=6`8uireSE+q-6l8A-r7EreP)%;4|DLCLq_I9+I
+z3)Gg~<hRZoHL*$^!OojDX$MY+L5M=A%YNhGdMBiFcN=noNQp8D1WpxmT%mA_{%qSN
+z^ngrkRoG*vI0I&=B^^z69kU|44Iy3#-koZ0Wr=AaZ?#xym4PDxoHbkgW5HC7qgpG`
+zmzWEaJUG+F&ZX1zmUhusp|7g9+gZZ|VnuzZC|1UBDvE>ObN<dbz~~@K%4J|R<H|6m
+zt7in&WCC?{YeAA{+FpXz9a1NScEVbbgX}StPc)htZ|m?wcU9(@l)mfw6u)*%EggCC
+zVFc1i_I)0t(yjDJMg}p8-2_%wn&K|b^)KQ>R`HC@ae=Sigao3yhK9i3=5ekLMn7e5
+z{&ZVN^9(wIgAaZr+_TWS3lvTP;3N<DJP{1FambY-dgyKv2Mms1v|>e#%w1@DE_OQ0
+z$Uaw-78ZB24qN*f{@@1$$D4DU2&=*ao*N=KwGXMsWlq6RL-FJ>s(IPVyYI~stp=U7
+zm;8c~a3^F0m{g|-iMlZLNLr|97ptqK9L+|%f!WDIYR|Uy3J;i-!ks~QRkvEkQ*74Q
+zH1Mtx>sIFoEPqMiS*UVK+ZEIg>RlMQ@#wNi>F)}6w8+76IW)e-|HY7hbP4G}c5!xa
+z3Y79ovHlrF&uN{7Y2p{Dr$_u}DHWdcLswWm>=8~oBSV4n5XI5emTmezg^NkXR(J|K
+zO@=#;WRB<seVt=xu-iMa$Ghk~RY9>m7gc@~E?vw)8|y*w7(Zad-^evE?y(=@4{rAd
+zF-76mbn8bkjVyGP?CU`V<w&5R#R6jf+b*7}#XKTBTt5walIWgCQ`{G)ID$tF$tKoO
+z^s04>Ul--Q#R8#w>b&VHiA6{-WMTxvmg_g(aAg*TdQ02Ugtg1Ic0Js<&uWTal1H;f
+z(nDwSR9W<xLEVU`keo^eMI!dzQ5yWQh9Oc>w0OOW;9g>0f&ZCr)Zl&V$3MFkCrJF_
+zNe0vyjC&<zo@rdXSjv`ch#ybHM`GKQjB944<}h>IkY)PSOkgVn2}Kw|LIzR~wjhh+
+zhcrl1u&u?uZ*ZLbO^hjW$BHxaqWMvaBi67o{40EhFz2+JV8t|BGB2)GrN_g42|#!>
+zKUyJB^IW3?4xP7#LJ~18IZuKAwfr6Nd$Vw*+x47&T<4W8(Sx-(aI&=WVAotizR#}g
+z2~4&OD@<kW;z%I=M!%%|DZCy@-3-6~N_<MUrDn~mC}(7_vJ6P0r^+|{*l2hNuakB)
+z<2&xf^KiG=H^W_Ku)bAJ45B99q{5;THXBSh`L#CBVY)#z^pxm|{k3DYHY1-Ncp}R-
+zx4b_eMOQS{WPy5mEgt<mnz<g^IA~BC2ZhXYZ?r0GDa4k!fX&RhA45ETEAI?>5r;gQ
+zEC(3ErZfiq)v(QNdQa#hpFe1Rddkc%;_LVR6o2R7;@|Yi*+jhJeD%jp8I^I<P<xgc
+z=Q`~s>y)?l?CQRYB+4GS-6$GVp+yx6G8+>-z_RbJ?^s)4hL$&p`YekFd%bm5HP+<+
+z0$}f&fj8U5!n^zdGW+5gHAN*V^g1K8fnYNyiaq@GoyLEO&&e2AG(|dgv~_>-o$tK#
+zo7~s`p{P4@x8^bkj?-1_%k!BqEO_f4!{bS><Eu6HH4)gV+!R&9Ex1q`X6sK}ru;bg
+z)A<qJ;zGjDG7<4M@0eCu(~el$0XXRo&&N6s$5NyG4W9w?^##XX-?4u0aj^bJ!JgQ;
+zgmo`oEYBX_qd*sy(r>c$^CQ}Sh!`Gnv7Vz~=WnlREbuVP-v%>kk;$_DLUfk%L46q`
+zpP9+X!tr>Tzz}D*t|#bs7Qqa2JgDV7<yl;q2vA4cYyQ}ju;zmp?aRUnj=!$$2cB|R
+zHsGbyhPkP}xmM*U|KxtfL=NrUek?T!Yc}SjqReAQkUk)DU*qdZLkV$EPHEJ5dJbD@
+z%8nMou>WeN(5fq@=ioi)AH$dGD1zmVjKam2uX7FrT<e64%ss(;thom-F5paF3<?-%
+zyf@F?+crdwHE^DexF`(G#p#TG;F4a2b5q3+`~k|+7BOGJ`+pKIz7RUgE;tgzU_!nS
+z>ZS>qN^EUjcs_VtPnQspR5=Bfm2IYtz$S@o=Y`I!96I@Kr2d1L*f8Fr7s_~S<-V^^
+z$i>=NdVgta`aN%hXz)b^n9>ZDplKQ$FY1`LvD&*w`7VfHu$iTxtwS*htt0JDCykOG
+zOvr;k9tPl0q66lKzszNI?d65OJhd<Q)1}Bn0myKKv%0hK27#B!qsM^VJYOwbSIAZ$
+zG%;|UIG%5%NgZu^&nfc$feGSo$dySC0w?_H*Qdp9<22Wu8k1?F`(NXo0Rko7{f<c`
+z6GcBgC|W&#aGXT|1-Vhk?QCQZ2X~|HX1t9)IYW07XcSdMQGOk-yH>1wN@RWtRA@iV
+zT+@XV6lb~+UM|usPe*TZ0dpcQW$_mFgCZMlTf5-16&~KRyTam8oe(qzjpahE-q)hJ
+zf2s|1YvHXHXLi5hPD+STGWql*)#LC8`RktfKkUCVEts$-L{!7#ELful=SzulJ3*OW
+zLKO8u4+~;e)T<{z=^#2BNO&3#Vs)TN#c_G_!g)quS~DQL_nbww*YrE2Ozdr{1^sV3
+zoRxgEltYDjbOWqoy^yU`2e(xjOEvKX-lxx&OaJtNp5S~LCdwliMU`%JsvzeUMCH&Y
+zmFwV3f<YLxn+jqNni?&s9(Q)zH{>dKwx3Yc&X`yzDGv^`Nr3sTUA^QxN~vK<sG@r+
+zc~^^n%s!-@f8SHp?>XYU?kq~v=0qb~C8Bm?mLdBVd#0nQ-PeZ|2SzLO3bUyY%n1IJ
+zW8AOT(zO&=)*nA0USNX@N5V9g0q=XC=Lwyw?xpGqlA?R6E(4oDef6onCEw}_DufhQ
+z2jcN6cj=2`M1cb6*P^BAQoKvr5HP8)x0ZCEku2NGVS>63Z0)J~GrEr~uJQs@xsuX(
+zvfpz8ZD4;o_kNSIHc>5+V`R0BU5^CQ7+95N3dGvi(GvO0X(9oE=IiI*ND7#u_(ScV
+zaF0%}mdULO$`01wf8%egc;t_L1x>_;E5K1YHd}hacwaP~xokU173G8yFr))ozDx9c
+zCeBn(=+tK$W*3hx-x%&-EhD4%Rfccw1MZ3P<b{p>M^*8Q15(>PE3tp71~EkRNH=<5
+zJ!&%rJGczi%zSS2=;rs$IV%TUJf+RkPy<ziBa}~V3^Mqed2fBahR@9BWISEY;Tw_g
+zU#d1*>Mnh&*k}Mg_UR4_-;=H1di&eI&7|S~>>$dOXWx9fRKZVJHvU`{(y`;^r!yaZ
+zf*kk@iO9eEht0vx_!u7#;N!o#Y6h92VUIGVn!}AMIcXKkoKO8F+Uh-K*d6ccQcTmJ
+zTrEt8+=!Gls%<kx3Z_RNPigf~-k6Cy*YJ38tlgDk)DRwXsoE(Q7JN=W5`6KIhoH)A
+z!<KQxMg<|-+aZTwgC|$sqUCJ-;A0#9c{_-4D~1ZIl0fR!r5S6o@A0jOhr}%(utq<K
+zf=2?8sAuOheezC!VNkw4*ebE_le$&q>K%?uj`kb68oag}t|;E;SVTm2?V9lss*KK4
+zE<hLReAxo=7|)}<O0D>cXR9;*yq(0T?K`6$tN(i_Jyl>AbB=IX|ID?EMbx9=dq{DH
+zB@@C4&h6;kUrEmYT2?TFrf=Rm2E;||SyO{9MUVBYc7dn5w>8W!QdFs>>a&MH2gt}k
+zxUuFPWS<$gVnp619bqTZRWfO0QI4325;gT$Qf&Lt&^t*M6$n~r@w+uW&{%demK?9f
+zbM|1ON3V-K-;FkUzKg0Ae3w2i6APdeVKLBe$b=9r1{l{68#X%PuLh--!*c$h7Kgro
+zVfBZ{UwV}MV;{sY&@&$`Y^6S#J=!T)r|gI0zyFiB1dE@@0-U}OJbDEJ5Bc4TXULEb
+z;aFUozN@7`q>_}PDO8eV+LoLQgJvI9z|JM{XKkv`jOs|T2Mi{rj-g+}GT9k!_+&2d
+z{qQ~J6%RFfyrtGt-$gx~NN|db$g<fR6CVAb9H>92^Z@{cSMTOP%#B{Al?H0x5%UQi
+zGMIphW24}3YwW>-=<bg4&7mEvMoCFxKFl~!?T(k%lRn&Db8%oo=oL)o8GcDn=De+Y
+zv><LvhJ9>b{r!~f`j*=hnKX2wY;|%2JB3I(=`sw8EN9CjC5t03=o4aD$I4o4LDC{B
+zL&3HdPbr2b?uH(czeXoU`XEoFRL<KdFHeib6r!fHGprAz=;rrJv|k`%Np#U*(||+?
+z{4H-m?#LvdOd8_^`ytYpfkWgHLcI((>hy1xi0-8ra%{{}=~0SA2)iP!7&HZGGOpOk
+zL+gqYPy8Bg2;L01w&OcS{J|b;?ga}mi5N(P^r?~|8|FTOdSQkWc)~F!bLHyy!izk3
+zHx;DN2qUu&9X&{e9s53|ho1-K7S}MY<<f0}c~fJsVV9@#hoL$)pAqy6U4!L5U5<K1
+zWp_?wirng3F$U+uRA}0XwUZac@(7P<>`2S%C$SX!D`7N5tMrxUsiO5<^J3-}>dZoi
+zqD{eh31zc?>uxC&9+(S`D)e?g@0c{?qBIG-Po!d9j-}<Kk6k-{HnOSgsonv;luIj3
+zySjxo;R|pTZv7mHU*SbUC)k|Ag(WNXBC%0z%!*1nC6O$V{jZ$o%7cn|u5vEFBXJ>Q
+z!*Dd#r#1drF4?xkwGdcB>Q{9Md{o);tbOT0d3=|Oy3873<1tvctYGIYMI+7Jm|^sl
+zEPu|bFx*cm18sY<p7iYqt>wTjFZV_YV-w~?1#ZVA^6We*uB`qlk|UU%X5WMIS=Yp4
+ziklSuUNG#AB|n*P=o&D~caO)O*=ZqOi2q%w&!Q81Kpwa&dQG#r(7V#4OV$^wU(kbN
+z;tn`_<)Gs~4GyV>j6$Cw)65l9BV04{_Ga%v{=g|jrD}tBESJoV&&gVpaa^4NYB5Et
+zgxM}n+dK+gR)F0vu}+qPIii{5R3mH?&y=&>k9-mB4ZRhv&;^)3^2PQIhd)Oe!^f7Z
+zG@fq8LR`;$V^T^d&G$2UVxwXD$E-S}pB|KV&Q_2~$>CS@=;(ptO?0_&oy-BP?>0|1
+z=f&J~P6yIN^sHoP3w5uddM{-+4Nn!(+r?=#Vq?LT#7-4Ui8pO7uHCWx&9rc%*T<Zl
+z@<>{D1;DQ+R7I(HPv?o4>jYXOILgfFW+iQ5nZpY}Y@LYRh23#H%Q7v-pKoHmnVu0H
+zqL@$MsRYY(4w++~&PO12jZD!0^6NaTMK&SNe_}2nuZE#wz85Qlw~RP!2JZFCE5g`$
+zwkbkX1t2}=p!BSraGTlD&jh~~q1<HA2>86ibWU$^KZMdf=S-voB_{Be=!hoG+KQsD
+z&wXf>=@D?Y1GJ4+lMM%1s|_4az`Mdzy9KPX^0jPu;=>b-8LuRUIU>jj)n*(x0><WG
+z-r3N@9lug>u2tGWDNeQbt3di69$hh|6q?vS)n50*d=1kNObMMGQKFJHYt{Mve<(2c
+zF|RrL2@fHX_pmyZb=G{dhY#inx1qz@dr)Mjx<5TQtk55=yBxj=sVF;4kSU_=V3|#Z
+zAGoaR<+Ecg6ikpL`loPcYZcyJf00Q5hzR(X151eGvlVc>C~B4dqlTmE&fe9@!M2R?
+z`gLru*i-eclNLI)>C)a(-$Wzz??o}4B~(=qu+e^`u<B53p|Yxtk!9r?{zP3a2ei$g
+z7qyegPZpnO`;M2z@rUq&zDDKxcMZ$g2|)f*KsZ|wl+o;*;LEPPAz~(Yv5x@~QkNv-
+zN?Os=j5cEbB<Lg|*ejQgx<-T^8{r+zaqaz6a;VGM&-V2PhiXefz~z+>kj@y~DYGO<
+zs)<PFA~K1P{1cv+mmMyI>A>r6B8rX~@HR|Po-F!<K`D$*A`OaE{$T}pZ0r!!llbkD
+z`V&@|tQT(A@ANKpoI}0x)nA8?B;34da(6G}n-rIzaf-0q`aTFY8`)$*B3~$wf|=R4
+z5cFPRKoG$PhAYq*`VN>!D4{ZO-&pk3kho+eas6E)CrDw9O33oxO@O#afG8i(Z!_oK
+zAKERYNFm8=fUsCnMj#p{6EZ1ctO2>j1IOB~OwPb2z^L8!w37nQDT~oZ=+%2^I`7>G
+zYq7ix?PFapPUwV8^{XFqjl4BGOb0}s^Ye}+CMGCauoOBCsiAtHtNOW=g5q3tLJbMO
+zP1iVdS=!C6-H>L`mH8xV=Qt~YXa@UABqX@3p<l<!M9gqDAjuUZs*grqJl!EO=QA(D
+z1AmlOW#fhNqmpuaT#>Jywkr7S>O}e^+p_1$<PJcb(dIMTEnDLMgw=KJHSMw#38v`n
+zNE5w0tq?d4-YL)C>sMHPZ1Vmy{x>>A6oOFrT4gQ-XB2V#Kg^9Sw5n;G;WvjU<-liR
+z3(UT^b6H1;;oqCRl}IHjBZdFyE$ZM56iKgL@f?QoL6V{wdx7eDFfxLn-jsDkr7}WY
+zn~`0B4}0B-b=g|eLLy|;V>$fp&ah%^^Wc<lTc^}KZN(;{MEj;n2yEafEiXmkKU4c;
+z=bv1ExGt;0mp0K0tu9w6+r0aj+nDJg=0kpm^4Tzs%;-@YHIj6M;O4J+t6hE7f`-7;
+zao(}xWhv*XbahD2`D#Izz!3-XONJ|;>lrq5rR#hHMRMkz3M9#Vk!$bj$jcP9Q&Gxp
+zFc*{PGTx&OSa|zAy9pi{Bq0bT0gMD;oU7<l+|dM^j`8mn5=eyb!&9C7(r|zEHi#gB
+zgvU~o0t9ZO9(7LCOHt)e(hZ6b9&2jKRcgtXLzMj<9472AU36&#{`HcR0>sn7o@nTi
+z(ldr-syTfw3Mp-*@HBXN4Jvz(!Jf|d(`@OBB{<K*9@bBzKcVN;o937Md}h@~5eP3K
+z>V_$X?1-}iBon+qZl`TbU!_ef;VuKDXpT?dr|AemABiMgzN_o`D6Jfm&81?z{e4b3
+zYc=ac?c|SxyIjvv(82jD27QZt56x2#oBSXpUzHVw%8c7RDuIUmDk*rE-xa{SaE8bw
+zlJK7thNvSKyAbVinjpoikI!+F4KhvWnjF$Zt1i0>mP2SaUs}C^QxkpGT=ujut=`<L
+z8otDc!o$b_9I(*LxHe{`3QKP1_}TA8>&S};G2rb5lJKo)c8TPBB1Jv!%8E34Tu~&x
+zi`5CUZ58cLgt;y9_`=5fcHPnLc?ePIMhZe7(D8m9eX<cuO6!86plzcc%<*3dyCr#8
+zz~t5%K^fj$nt(NN2Gp(6N9PwtRf*7=mpooFXMBTA3K#UQh*?J?j3L|TT9rzxC9~Zt
+zwSxFM(Ela)m|?z)Lpl;Di@(lgogy&Ju=Nz0Ho;~D+@l&JQA;+`dD+jfZsrd;8D9p^
+z`nxKgEU?(v5~qNe_~X}KJ^yk2+rQN;#@9uOFY(x4eRHBabD59-Z+p_svH$U({tExy
+z+u?ufcK+9g{pW-*{%g$s|AU?WYs~&5$1JAZ@mm{r`GWkN@4&CzU*x|o``Itw`(K@)
+Bl{EkW
+
+literal 0
+HcmV?d00001
+
+diff --git a/evidence/verify-rubric.yaml b/evidence/verify-rubric.yaml
+new file mode 100644
+index 00000000..b84271a5
+--- /dev/null
++++ b/evidence/verify-rubric.yaml
+@@ -0,0 +1,19 @@
++rubrics:
++  - id: 1
++    type: f2p
++    text: "多目标调用只有在全部 scie 和请求的校验 sidecar 完成后才发布，成功结果包含完整且互相匹配的目标集合。"
++  - id: 2
++    type: f2p
++    text: "后续目标的获取或构建失败时，本次调用不会留下前序目标的新文件，并保留调用前已有的完整产物集。"
++  - id: 3
++    type: f2p
++    text: "校验文件生成或最终替换失败时，二进制与 sidecar 不会形成孤立或新旧混合组合，错误能指出失败目标和阶段。"
++  - id: 4
++    type: f2p
++    text: "--scie-only 只在整组发布成功后删除源 PEX；任一失败都会保留用户源文件，并只清理本次命令拥有的临时副本。"
++  - id: 5
++    type: f2p
++    text: "并发发布同名平台集合不会交叉混入文件或互删输入，每次可见切换都对应一套完整代次。"
++  - id: 6
++    type: p2p
++    text: "单平台、不同命名风格、eager 与 lazy、覆盖旧文件以及未启用 --scie-only 的成功行为保持兼容。"
+diff --git a/pex/cli/commands/scie.py b/pex/cli/commands/scie.py
+index c9eb6675..e7e67f79 100644
+--- a/pex/cli/commands/scie.py
++++ b/pex/cli/commands/scie.py
+@@ -7,7 +7,9 @@ import hashlib
+ import io
+ import os
+ import shutil
++import tempfile
+ from argparse import ArgumentParser
++from collections import OrderedDict
+ 
+ from pex import scie, specifier_sets
+ from pex.artifact_url import ArtifactURL
+@@ -16,6 +18,8 @@ from pex.cli.command import BuildTimeCommand
+ from pex.commands.command import OutputMixin
+ from pex.common import safe_mkdir
+ from pex.fetcher import URLFetcher
++from pex.fs import lock as fs_lock
++from pex.fs import safe_rename
+ from pex.interpreter_constraints import InterpreterConstraints
+ from pex.pep_440 import Version
+ from pex.pex_info import PexInfo
+@@ -23,17 +27,48 @@ from pex.resolve import resolver_options, target_options
+ from pex.resolve.target_configuration import TargetConfiguration
+ from pex.result import Error, Ok, Result, catch, try_
+ from pex.scie import build as build_scies
++from pex.scie.science import ScienceError
+ from pex.targets import Targets
+ from pex.typing import TYPE_CHECKING
+ 
+ if TYPE_CHECKING:
+-    from typing import Optional, Tuple, Union
++    from typing import List, Optional, Tuple, Union
+ 
+     import attr  # vendor:skip
+ else:
+     from pex.third_party import attr
+ 
+ 
++# A single `pex3 scie create` invocation publishes one indivisible generation of artifacts. All
++# work happens in a per-invocation candidate directory staged inside the destination directory
++# (so that final moves are same-file-system atomic renames). The candidate directory and the
++# commit lock use dot-prefixed names that never collide with requested scie or PEX names and keep
++# concurrent invocations isolated from each other.
++_CANDIDATE_PREFIX = ".~pex-scie-create-"
++_BACKUP_PREFIX = ".~pex-scie-backup-"
++_COMMIT_LOCK_NAME = ".~pex-scie-create.lck"
++
++
++@attr.s(frozen=True)
++class _StagedInput(object):
++    """The PEX staged into the candidate directory plus provenance about its source."""
++
++    staged_pex = attr.ib()  # type: str
++    pex_info = attr.ib()  # type: PexInfo
++    # The absolute path of the local PEX the candidate was copied from, if any. This is only set
++    # for a local path or file: URL and is the only path eligible for --scie-only reclamation.
++    source = attr.ib(default=None)  # type: Optional[str]
++    # Whether the source already lives directly in the destination directory and thus was used
++    # in place prior to this generation.
++    in_place = attr.ib(default=False)  # type: bool
++
++
++@attr.s(frozen=True)
++class _CommittedScie(object):
++    scie_info = attr.ib()  # type: scie.ScieInfo
++    final_file = attr.ib()  # type: str
++
++
+ def _narrow_interpreter_constraints(
+     pex_interpreter_constraints,  # type: InterpreterConstraints
+     user_interpreter_constraints,  # type: InterpreterConstraints
+@@ -214,6 +249,273 @@ def _extract_pex_info(path):
+     return path, pex_info_or_error
+ 
+ 
++def _is_in_place(path, dest_dir):
++    # type: (str, str) -> bool
++    return os.path.realpath(os.path.dirname(os.path.realpath(path))) == dest_dir
++
++
++def _copy_into_candidate(path, candidate_dir):
++    # type: (str, str) -> str
++    staged = os.path.join(candidate_dir, os.path.basename(os.path.normpath(path)))
++    if os.path.isfile(path):
++        # N.B.: shutil.copy preserves the file's permission bits, matching the historical
++        # behavior of staging a local PEX in the destination directory.
++        shutil.copy(path, staged)
++    else:
++        shutil.copytree(path, staged)
++    return staged
++
++
++def _stage_input(
++    candidate_dir,  # type: str
++    source,  # type: str
++    dest_dir,  # type: str
++    url_fetcher,  # type: URLFetcher
++):
++    # type: (...) -> Union[_StagedInput, Error]
++    """Stage the source PEX into the candidate generation directory.
++
++    A local PEX is only ever copied, never modified, and a remote PEX is only ever downloaded into
++    the candidate directory. Nothing is written to the destination directory at this stage.
++    """
++
++    if os.path.exists(source):
++        extracted = _extract_pex_info(source)
++        if isinstance(extracted, Error):
++            return extracted
++        source_path, pex_info = extracted
++        staged_pex = _copy_into_candidate(source_path, candidate_dir)
++        return _StagedInput(
++            staged_pex=staged_pex,
++            pex_info=pex_info,
++            source=os.path.abspath(source_path),
++            in_place=_is_in_place(source_path, dest_dir),
++        )
++
++    url = ArtifactURL.parse(source)
++
++    # A file: URL pointing at a PEX already living directly in the destination directory is treated
++    # as an in-place local input: validate any URL fragment fingerprint/size constraints against
++    # the original file (without copying it) and then stage a private copy for the builds.
++    if url.scheme == "file" and _is_in_place(url.path, dest_dir):
++        source_path = try_(_fetch(url=url, fetcher=url_fetcher, dest_dir=dest_dir))
++        extracted = _extract_pex_info(source_path)
++        if isinstance(extracted, Error):
++            return extracted
++        source_path, pex_info = extracted
++        staged_pex = _copy_into_candidate(source_path, candidate_dir)
++        return _StagedInput(
++            staged_pex=staged_pex,
++            pex_info=pex_info,
++            source=os.path.abspath(source_path),
++            in_place=True,
++        )
++
++    staged_pex = try_(_fetch(url=url, fetcher=url_fetcher, dest_dir=candidate_dir))
++    extracted = _extract_pex_info(staged_pex)
++    if isinstance(extracted, Error):
++        return Error(
++            "The PEX fetched from {url} could not be used to create scies: {err}".format(
++                url=source, err=extracted
++            )
++        )
++    _, pex_info = extracted
++    return _StagedInput(staged_pex=staged_pex, pex_info=pex_info)
++
++
++def _verify_generation(
++    scie_infos,  # type: Tuple[scie.ScieInfo, ...]
++    hash_algorithms,  # type: Tuple[str, ...]
++):
++    # type: (...) -> Optional[Error]
++    """Verify every built scie and requested checksum sidecar in the candidate directory."""
++
++    for scie_info in scie_infos:
++        target = scie_info.interpreter.render_description()
++        scie_file = scie_info.file
++
++        if not os.path.isfile(scie_file):
++            return Error(
++                "Failed to verify the scie for target {target} at the verification stage: the "
++                "expected built scie {scie_file} is missing or is not a regular file.".format(
++                    target=target, scie_file=scie_file
++                )
++            )
++        if os.path.getsize(scie_file) == 0:
++            return Error(
++                "Failed to verify the scie for target {target} at the verification stage: the "
++                "built scie {scie_file} is empty (0 bytes).".format(
++                    target=target, scie_file=scie_file
++                )
++            )
++
++        for algorithm in hash_algorithms:
++            sidecar = "{scie_file}.{algorithm}".format(
++                scie_file=scie_file, algorithm=algorithm
++            )
++            if not os.path.isfile(sidecar):
++                return Error(
++                    "Failed to verify the {algorithm} checksum sidecar for target {target} at the "
++                    "verification stage: the expected checksum file {sidecar} is missing.".format(
++                        algorithm=algorithm, target=target, sidecar=sidecar
++                    )
++                )
++            try:
++                with open(sidecar, "r") as fp:
++                    recorded_fingerprint = fp.readline().strip().split()[0]
++            except (IOError, OSError, IndexError) as e:
++                return Error(
++                    "Failed to verify the {algorithm} checksum sidecar {sidecar} for target "
++                    "{target} at the verification stage: {err}".format(
++                        algorithm=algorithm, sidecar=sidecar, target=target, err=e
++                    )
++                )
++            try:
++                actual_fingerprint = CacheHelper.hash(
++                    scie_file, digest=hashlib.new(algorithm)
++                )
++            except ValueError:
++                # The local hashlib cannot compute this algorithm, so only the presence of the
++                # sidecar (produced by science) can be verified here.
++                continue
++            if recorded_fingerprint != actual_fingerprint:
++                return Error(
++                    "Failed to verify the {algorithm} checksum sidecar for target {target} at the "
++                    "verification stage: the fingerprint recorded in {sidecar} "
++                    "({recorded_fingerprint}) does not match the built scie {scie_file} "
++                    "({actual_fingerprint}).".format(
++                        algorithm=algorithm,
++                        sidecar=sidecar,
++                        target=target,
++                        recorded_fingerprint=recorded_fingerprint,
++                        scie_file=scie_file,
++                        actual_fingerprint=actual_fingerprint,
++                    )
++                )
++    return None
++
++
++def _remove_path(path):
++    # type: (str) -> None
++    if os.path.isdir(path) and not os.path.islink(path):
++        shutil.rmtree(path, True)
++    elif os.path.lexists(path):
++        try:
++            os.unlink(path)
++        except OSError:
++            pass
++
++
++def _commit_generation(
++    dest_dir,  # type: str
++    artifacts,  # type: Tuple[Tuple[str, str], ...]
++    reclaim_relpaths=(),  # type: Tuple[str, ...]
++):
++    # type: (...) -> Optional[Error]
++    """Replace same-named prior outputs with the staged generation as one indivisible switch.
++
++    An exclusive destination-directory-scoped file lock serializes concurrent publishers so the
++    later finisher always swaps based on a complete prior generation. Existing outputs are moved
++    aside into a backup directory on the same filesystem and are restored if any single move
++    fails. The backup (the prior generation and, with `--scie-only`, the reclaimed source PEX) is
++    deleted only after the whole switch has succeeded.
++    """
++
++    def error_at_commit_stage(rel, err):
++        # type: (str, OSError) -> Error
++        return Error(
++            "Failed to commit the staged scie generation to {dest_dir} at the commit stage while "
++            "installing {name}: {err}\n"
++            "All previously existing files were restored; the destination directory is unchanged "
++            "and the staged generation was discarded.".format(
++                dest_dir=dest_dir, name=rel, err=err
++            )
++        )
++
++    file_lock = fs_lock.acquire(
++        os.path.join(dest_dir, _COMMIT_LOCK_NAME), exclusive=True
++    )
++    backup_dir = None  # type: Optional[str]
++    try:
++        backup_dir = tempfile.mkdtemp(dir=dest_dir, prefix=_BACKUP_PREFIX)
++
++        displaced = OrderedDict()  # type: OrderedDict[str, str]
++        created_dirs = []  # type: List[str]
++
++        def displace(rel):
++            # type: (str) -> None
++            dst = os.path.join(dest_dir, rel)
++            if os.path.lexists(dst):
++                backup = os.path.join(backup_dir, rel)
++                parent = os.path.dirname(backup)
++                if parent != backup_dir and not os.path.isdir(parent):
++                    safe_mkdir(parent)
++                safe_rename(dst, backup)
++                displaced[rel] = backup
++            else:
++                parent = os.path.dirname(dst)
++                if parent and not os.path.isdir(parent):
++                    safe_mkdir(parent)
++                    created_dirs.append(parent)
++
++        artifact_rels = frozenset(rel for _, rel in artifacts)
++        reclaim_plan = tuple(rel for rel in reclaim_relpaths if rel not in artifact_rels)
++
++        installed = []  # type: List[str]
++        failure = None  # type: Optional[Tuple[str, OSError]]
++        try:
++            for rel in reclaim_plan:
++                try:
++                    displace(rel)
++                except OSError as e:
++                    failure = (rel, e)
++                    break
++            if failure is None:
++                for src, rel in artifacts:
++                    try:
++                        displace(rel)
++                        safe_rename(src, os.path.join(dest_dir, rel))
++                        installed.append(rel)
++                    except OSError as e:
++                        failure = (rel, e)
++                        break
++        finally:
++            if failure is not None:
++                failed_rel, err = failure
++
++                # Undo completed installs, then restore every displaced prior file.
++                for rel in reversed(installed):
++                    dst = os.path.join(dest_dir, rel)
++                    _remove_path(dst)
++                    backup = displaced.get(rel)
++                    if backup and os.path.lexists(backup):
++                        try:
++                            safe_rename(backup, dst)
++                        except OSError:
++                            pass
++                for rel, backup in displaced.items():
++                    dst = os.path.join(dest_dir, rel)
++                    if rel not in installed and not os.path.lexists(dst):
++                        try:
++                            safe_rename(backup, dst)
++                        except OSError:
++                            pass
++                for directory in reversed(created_dirs):
++                    try:
++                        os.rmdir(directory)
++                    except OSError:
++                        pass
++
++            if backup_dir and os.path.isdir(backup_dir):
++                shutil.rmtree(backup_dir, True)
++
++        if failure is not None:
++            return error_at_commit_stage(failed_rel, err)
++        return None
++    finally:
++        file_lock.release()
++
++
+ class Scie(OutputMixin, BuildTimeCommand):
+     """Manipulate scies."""
+ 
+@@ -270,81 +572,144 @@ class Scie(OutputMixin, BuildTimeCommand):
+             # editable whls.
+             honor_editable=False,
+         )
+-        if os.path.exists(self.options.pex[0]):
+-            pex_file, pex_info = try_(_extract_pex_info(self.options.pex[0]))
+-            if self.options.dest_dir and os.path.realpath(
+-                self.options.dest_dir
+-            ) != os.path.realpath(os.path.dirname(pex_file)):
+-                pex_dest = os.path.join(
+-                    safe_mkdir(self.options.dest_dir), os.path.basename(pex_file)
+-                )
+-                if os.path.isfile(pex_file):
+-                    shutil.copy(pex_file, pex_dest)
+-                else:
+-                    shutil.copytree(pex_file, pex_dest)
+-                pex_file = pex_dest
+-        else:
+-            pex_file, pex_info = try_(
+-                _extract_pex_info(
+-                    try_(
+-                        _fetch(
+-                            url=ArtifactURL.parse(self.options.pex[0]),
+-                            fetcher=URLFetcher(
+-                                network_configuration=resolver_configuration.network_configuration,
+-                                handle_file_urls=True,
+-                                password_entries=resolver_configuration.repos_configuration.password_entries,
+-                            ),
+-                            dest_dir=self.options.dest_dir,
+-                        )
+-                    )
+-                )
+-            )
+-
+-        targets = try_(
+-            _resolve_targets(
+-                pex_interpreter_constraints=pex_info.interpreter_constraints,
+-                target_configuration=target_options.configure(
+-                    self.options, pip_configuration=resolver_configuration.pip_configuration
+-                ),
+-            )
+-        )
+-
+-        scie_configuration = scie_options.create_configuration(targets=targets)
+-        if not scie_configuration:
+-            return Error(
+-                "You selected `{scie_options}`, but none of the selected targets have "
+-                "compatible interpreters that can be embedded to form a scie:\n{targets}".format(
+-                    scie_options=scie.render_options(scie_options),
+-                    targets="\n".join(
+-                        target.render_description() for target in targets.unique_targets()
+-                    ),
+-                )
+-            )
+-
+         url_fetcher = URLFetcher(
+             network_configuration=resolver_configuration.network_configuration,
+             handle_file_urls=True,
+             password_entries=resolver_configuration.repos_configuration.password_entries,
+         )
+-        with self.output(self.options) as out:
+-            for scie_info in build_scies(
+-                configuration=scie_configuration,
+-                pex_file=pex_file,
++
++        source = self.options.pex[0]
++        if self.options.dest_dir:
++            dest_dir = os.path.realpath(os.path.abspath(self.options.dest_dir))
++        elif os.path.exists(source):
++            # N.B.: For a local PEX path the outputs historically land next to the PEX when no
++            # `--dest-dir` is given; a URL input instead lands in the current working directory.
++            dest_dir = os.path.realpath(os.path.dirname(os.path.abspath(source)))
++        else:
++            dest_dir = os.path.realpath(os.getcwd())
++        safe_mkdir(dest_dir)
++
++        # One `pex3 scie create` invocation corresponds to one indivisible generation: the input is
++        # copied or downloaded into this process's candidate directory, every target is built and
++        # verified there, and only then are same-named prior outputs replaced as a whole under a
++        # destination-scoped lock. Any failure leaves the pre-invocation set of files visible and
++        # only ever cleans up this invocation's candidate directory.
++        candidate_dir = tempfile.mkdtemp(dir=dest_dir, prefix=_CANDIDATE_PREFIX)
++        try:
++            # Stage 1: acquire the input into the private candidate directory.
++            staged = _stage_input(
++                candidate_dir=candidate_dir,
++                source=source,
++                dest_dir=dest_dir,
+                 url_fetcher=url_fetcher,
+-            ):
+-                print(
+-                    "Saved PEX scie for {python_description} to {scie}".format(
+-                        python_description=scie_info.interpreter.render_description(),
+-                        scie=os.path.relpath(scie_info.file),
++            )
++            if isinstance(staged, Error):
++                return staged
++
++            targets = try_(
++                _resolve_targets(
++                    pex_interpreter_constraints=staged.pex_info.interpreter_constraints,
++                    target_configuration=target_options.configure(
++                        self.options,
++                        pip_configuration=resolver_configuration.pip_configuration,
+                     ),
+-                    file=out,
+                 )
+-            if scie_configuration.options.scie_only and os.path.realpath(
+-                pex_file
+-            ) != os.path.realpath(scie_info.file):
+-                if os.path.isfile(pex_file):
+-                    os.unlink(pex_file)
+-                else:
+-                    shutil.rmtree(pex_file)
+-
+-        return Ok()
++            )
++
++            scie_configuration = scie_options.create_configuration(targets=targets)
++            if not scie_configuration:
++                return Error(
++                    "You selected `{scie_options}`, but none of the selected targets have "
++                    "compatible interpreters that can be embedded to form a scie:\n{targets}".format(
++                        scie_options=scie.render_options(scie_options),
++                        targets="\n".join(
++                            target.render_description()
++                            for target in targets.unique_targets()
++                        ),
++                    )
++                )
++
++            # Stage 2: build a scie for every target into the candidate directory. A failure for
++            # any target aborts the whole generation; nothing has been published yet.
++            try:
++                scie_infos = tuple(
++                    build_scies(
++                        configuration=scie_configuration,
++                        pex_file=staged.staged_pex,
++                        url_fetcher=url_fetcher,
++                        dest_dir=candidate_dir,
++                    )
++                )
++            except ScienceError as e:
++                return Error(
++                    "Aborted creation of the scie generation for {source} at the science build "
++                    "stage. No files in {dest_dir} were changed and the staged candidate "
++                    "directory was cleaned up.\n{err}".format(
++                        source=source, dest_dir=dest_dir, err=e
++                    )
++                )
++
++            # Stage 3: verify every named result and requested checksum sidecar in the candidate.
++            verification_error = _verify_generation(
++                scie_infos=scie_infos,
++                hash_algorithms=scie_configuration.options.hash_algorithms,
++            )
++            if verification_error:
++                return Error(
++                    "Aborted creation of the scie generation for {source} at the verification "
++                    "stage. No files in {dest_dir} were changed and the staged candidate "
++                    "directory was cleaned up.\n{err}".format(
++                        source=source, dest_dir=dest_dir, err=verification_error
++                    )
++                )
++
++            # Assemble the complete set of candidate artifacts keyed by destination relpath.
++            artifacts = OrderedDict()  # type: OrderedDict[str, str]
++            final_scies = []  # type: List[Tuple[str, scie.ScieInfo]]
++            for scie_info in scie_infos:
++                rel = os.path.relpath(scie_info.file, candidate_dir)
++                artifacts[rel] = scie_info.file
++                final_scies.append((rel, scie_info))
++                for algorithm in scie_configuration.options.hash_algorithms:
++                    sidecar_rel = "{rel}.{algorithm}".format(rel=rel, algorithm=algorithm)
++                    artifacts[sidecar_rel] = os.path.join(candidate_dir, sidecar_rel)
++
++            staged_pex_rel = os.path.basename(os.path.normpath(staged.staged_pex))
++            reclaim_relpaths = ()  # type: Tuple[str, ...]
++            if scie_configuration.options.scie_only:
++                # With --scie-only the source PEX is only reclaimed when it was an in-place user
++                # file and only as part of the successful whole-generation switch. When the PEX
++                # name collides with a scie name, the switch itself replaces the source, so no
++                # separate reclamation is needed.
++                if staged.in_place and staged_pex_rel not in artifacts:
++                    reclaim_relpaths = (staged_pex_rel,)
++            else:
++                # Publish the PEX alongside the scies, overwriting any same-named prior PEX as
++                # part of the generation switch. setdefault handles a PEX whose name collides
++                # with its scie's name (the scie already overwrote the staged copy).
++                artifacts.setdefault(staged_pex_rel, staged.staged_pex)
++
++            # Stage 4: switch the whole generation into place atomically with respect to other
++            # processes publishing into the same directory.
++            commit_error = _commit_generation(
++                dest_dir=dest_dir,
++                artifacts=tuple((src, rel) for rel, src in artifacts.items()),
++                reclaim_relpaths=reclaim_relpaths,
++            )
++            if commit_error:
++                return commit_error
++
++            with self.output(self.options) as out:
++                for rel, scie_info in final_scies:
++                    final_scie = os.path.join(dest_dir, rel)
++                    print(
++                        "Saved PEX scie for {python_description} to {scie}".format(
++                            python_description=scie_info.interpreter.render_description(),
++                            scie=os.path.relpath(final_scie),
++                        ),
++                        file=out,
++                    )
++
++            return Ok()
++        finally:
++            shutil.rmtree(candidate_dir, True)
+diff --git a/pex/scie/__init__.py b/pex/scie/__init__.py
+index 18320d62..2b9c3983 100644
+--- a/pex/scie/__init__.py
++++ b/pex/scie/__init__.py
+@@ -658,7 +658,10 @@ def build(
+     pex_file,  # type: str
+     url_fetcher=None,  # type: Optional[URLFetcher]
+     env=ENV,  # type: Variables
++    dest_dir=None,  # type: Optional[str]
+ ):
+     # type: (...) -> Iterator[ScieInfo]
+ 
+-    return science.build(configuration, pex_file, url_fetcher=url_fetcher, env=env)
++    return science.build(
++        configuration, pex_file, url_fetcher=url_fetcher, env=env, dest_dir=dest_dir
++    )
+diff --git a/pex/scie/science.py b/pex/scie/science.py
+index 0aa55283..e7994085 100644
+--- a/pex/scie/science.py
++++ b/pex/scie/science.py
+@@ -9,6 +9,7 @@ import re
+ import shutil
+ import subprocess
+ import sys
++import tempfile
+ import time
+ from collections import OrderedDict
+ from subprocess import CalledProcessError
+@@ -709,8 +710,16 @@ def build(
+     pex_file,  # type: str
+     url_fetcher=None,  # type: Optional[URLFetcher]
+     env=ENV,  # type: Variables
++    dest_dir=None,  # type: Optional[str]
+ ):
+     # type: (...) -> Iterator[ScieInfo]
++    """Build one scie per configured interpreter.
++
++    All outputs (scie executables and any requested hash sidecars) are written under
++    `dest_dir`. When `dest_dir` is not given the outputs are written next to `pex_file`, which is
++    the historical behavior. A caller staging a transactional generation can pass a private
++    candidate directory that no other process will read from or write to.
++    """
+ 
+     science = ensure_science(
+         url_fetcher=url_fetcher,
+@@ -729,12 +738,18 @@ def build(
+     elif len(configuration.interpreters) > 1:
+         use_platform_suffix = True
+ 
++    output_base = (
++        os.path.abspath(dest_dir)
++        if dest_dir
++        else os.path.dirname(os.path.abspath(pex_file))
++    )
++
+     errors = OrderedDict()  # type: OrderedDict[Manifest, str]
+     for manifest in create_manifests(configuration, name, pex, use_platform_suffix):
+         args = [science, "--cache-dir", _science_dir(env, "cache")]
+         if env.PEX_VERBOSE:
+             args.append("-{verbosity}".format(verbosity="v" * env.PEX_VERBOSE))
+-        dest_dir = os.path.dirname(os.path.abspath(pex_file))
++        dest_dir = output_base
+         if PlatformNamingStyle.PARENT_DIR is naming_style:
+             dest_dir = os.path.join(dest_dir, manifest.interpreter.platform.value)
+         args.extend(
+@@ -806,15 +821,19 @@ def build(
+             )
+             _, stderr = process.communicate()
+             if process.returncode != 0:
+-                saved_manifest = os.path.relpath(
+-                    os.path.join(dest_dir, os.path.basename(manifest.path))
++                # The build output directory may be a private staging candidate that is cleaned up
++                # on failure, so save the lift manifest under the system temp dir instead of next
++                # to the outputs so it remains available for inspection.
++                saved_manifest_dir = tempfile.mkdtemp(prefix="pex-scie-lift-manifest-")
++                saved_manifest = os.path.join(
++                    saved_manifest_dir, os.path.basename(manifest.path)
+                 )
+                 shutil.copy(manifest.path, saved_manifest)
+                 errors[manifest] = (
+-                    "Command `{command}` failed with exit code {exit_code} (saved lift manifest to "
+-                    "{saved_manifest} for inspection):\n{stderr}"
++                    "Command `{command}` failed with exit code {exit_code} at the science build "
++                    "stage (saved lift manifest to {saved_manifest} for inspection):\n{stderr}"
+                 ).format(
+-                    command=" ".join(shlex_quote(arg) for arg in args[:-1] + [saved_manifest]),
++                    command=" ".join(shlex_quote(arg) for arg in args[:-1] + [manifest.path]),
+                     exit_code=process.returncode,
+                     saved_manifest=saved_manifest,
+                     stderr=stderr.decode("utf-8").strip(),
+@@ -839,11 +858,11 @@ def build(
+ 
+     if errors:
+         raise ScienceError(
+-            "Failed to build {count} {scies}:\n\n{errors}".format(
++            "Failed to build {count} {scies} at the science build stage:\n\n{errors}".format(
+                 count=len(errors),
+                 scies=pluralize(errors, "scie"),
+                 errors="\n\n".join(
+-                    "{index}. For {python_description}: {err}".format(
++                    "{index}. For target {python_description}: {err}".format(
+                         index=index,
+                         python_description=manifest.interpreter.render_description(),
+                         err=err,
+diff --git a/tests/commands/test_scie_generation.py b/tests/commands/test_scie_generation.py
+new file mode 100644
+index 00000000..84c4b2d1
+--- /dev/null
++++ b/tests/commands/test_scie_generation.py
+@@ -0,0 +1,293 @@
++# Copyright 2026 Pex project contributors.
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++from __future__ import absolute_import
++
++import hashlib
++import os
++import shutil
++import threading
++
++import pex.cli.commands.scie as scie_cli
++from pex.cli.commands.scie import (
++    _BACKUP_PREFIX,
++    _COMMIT_LOCK_NAME,
++    _commit_generation,
++    _verify_generation,
++)
++from pex.fs import lock as fs_lock
++from pex.result import Error
++from pex.scie.model import InterpreterDistribution, Provider, ScieInfo, ScieStyle
++from pex.sysconfig import SysPlatform
++
++
++def _write(path, content):
++    parent = os.path.dirname(path)
++    if parent and not os.path.isdir(parent):
++        os.makedirs(parent)
++    with open(path, "w") as fp:
++        fp.write(content)
++    return path
++
++
++def _read(path):
++    with open(path, "r") as fp:
++        return fp.read()
++
++
++def _scie_info(path, platform=None):
++    return ScieInfo(
++        style=ScieStyle.LAZY,
++        interpreter=InterpreterDistribution(
++            provider=Provider.PythonBuildStandalone,
++            platform=platform or SysPlatform.CURRENT,
++            version=(3, 11),
++        ),
++        file=path,
++    )
++
++
++def _make_candidate(dest_dir, files):
++    candidate = os.path.join(str(dest_dir), "candidate")
++    os.mkdir(candidate)
++    for rel, content in files.items():
++        _write(os.path.join(candidate, rel), content)
++    return candidate
++
++
++def _artifacts(candidate, rels):
++    return tuple((os.path.join(candidate, rel), rel) for rel in rels)
++
++
++def _entry_names(dest_dir):
++    return set(
++        name
++        for name in os.listdir(str(dest_dir))
++        if name != _COMMIT_LOCK_NAME and not name.startswith(_BACKUP_PREFIX)
++    )
++
++
++def test_commit_whole_set(tmp_path):
++    dest = str(tmp_path)
++    _write(os.path.join(dest, "app-a"), "old-a")
++    _write(os.path.join(dest, "app-a.sha256"), "old-a-hash")
++    _write(os.path.join(dest, "app-b"), "old-b")
++    _write(os.path.join(dest, "keep-me"), "unrelated")
++
++    candidate = _make_candidate(
++        dest,
++        {"app-a": "new-a", "app-a.sha256": "new-a-hash", "app-b": "new-b"},
++    )
++
++    result = _commit_generation(dest, _artifacts(candidate, ["app-a", "app-a.sha256", "app-b"]))
++    assert result is None
++    shutil.rmtree(candidate, True)
++
++    assert "new-a" == _read(os.path.join(dest, "app-a"))
++    assert "new-a-hash" == _read(os.path.join(dest, "app-a.sha256"))
++    assert "new-b" == _read(os.path.join(dest, "app-b"))
++    assert "unrelated" == _read(os.path.join(dest, "keep-me"))
++    assert {"app-a", "app-a.sha256", "app-b", "keep-me"} == _entry_names(dest)
++
++
++def test_commit_platform_subdirs(tmp_path):
++    dest = str(tmp_path)
++    _write(os.path.join(dest, "linux-x86_64", "app"), "old-foreign")
++    _write(os.path.join(dest, "app"), "old-current")
++
++    candidate = _make_candidate(
++        dest,
++        {
++            "app": "new-current",
++            os.path.join("linux-x86_64", "app"): "new-foreign",
++            os.path.join("macos-aarch64", "app"): "new-mac",
++        },
++    )
++
++    result = _commit_generation(
++        dest,
++        _artifacts(
++            candidate,
++            [
++                "app",
++                os.path.join("linux-x86_64", "app"),
++                os.path.join("macos-aarch64", "app"),
++            ],
++        ),
++    )
++    assert result is None
++    shutil.rmtree(candidate, True)
++
++    assert "new-current" == _read(os.path.join(dest, "app"))
++    assert "new-foreign" == _read(os.path.join(dest, "linux-x86_64", "app"))
++    assert "new-mac" == _read(os.path.join(dest, "macos-aarch64", "app"))
++    assert {"app", "linux-x86_64", "macos-aarch64"} == _entry_names(dest)
++
++
++def test_commit_rollback_on_failure(tmp_path, monkeypatch):
++    dest = str(tmp_path)
++    _write(os.path.join(dest, "app-a"), "old-a")
++    _write(os.path.join(dest, "app-b"), "old-b")
++    _write(os.path.join(dest, "keep-me"), "unrelated")
++
++    candidate = _make_candidate(dest, {"app-a": "new-a", "app-b": "new-b"})
++
++    real_safe_rename = scie_cli.safe_rename
++
++    def failing_safe_rename(src, dst):
++        if os.path.dirname(src) == candidate and dst.endswith("app-b"):
++            raise OSError("injected commit failure")
++        return real_safe_rename(src, dst)
++
++    monkeypatch.setattr(scie_cli, "safe_rename", failing_safe_rename)
++
++    result = _commit_generation(dest, _artifacts(candidate, ["app-a", "app-b"]))
++    assert isinstance(result, Error)
++    message = str(result)
++    assert "commit stage" in message
++    assert "app-b" in message
++
++    # The prior generation is fully visible and intact; the new generation is discarded.
++    shutil.rmtree(candidate, True)
++    assert "old-a" == _read(os.path.join(dest, "app-a"))
++    assert "old-b" == _read(os.path.join(dest, "app-b"))
++    assert "unrelated" == _read(os.path.join(dest, "keep-me"))
++    assert {"app-a", "app-b", "keep-me"} == _entry_names(dest)
++
++
++def test_scie_only_reclaim(tmp_path, monkeypatch):
++    dest = str(tmp_path)
++
++    # Success path: the source PEX is reclaimed together with the new generation.
++    _write(os.path.join(dest, "cowsay.pex"), "the-pex")
++    candidate = _make_candidate(dest, {"cowsay": "the-scie"})
++    result = _commit_generation(
++        dest, _artifacts(candidate, ["cowsay"]), reclaim_relpaths=("cowsay.pex",)
++    )
++    assert result is None
++    shutil.rmtree(candidate, True)
++    assert "the-scie" == _read(os.path.join(dest, "cowsay"))
++    assert not os.path.exists(os.path.join(dest, "cowsay.pex"))
++    assert {"cowsay"} == _entry_names(dest)
++
++    # Failure path: the source PEX is restored; no scie is published.
++    _write(os.path.join(dest, "cowsay.pex"), "the-pex-2")
++    candidate = _make_candidate(dest, {"cowsay": "the-scie-2"})
++
++    real_safe_rename = scie_cli.safe_rename
++
++    def failing_safe_rename(src, dst):
++        if os.path.dirname(src) == candidate:
++            raise OSError("injected commit failure")
++        return real_safe_rename(src, dst)
++
++    monkeypatch.setattr(scie_cli, "safe_rename", failing_safe_rename)
++    result = _commit_generation(
++        dest, _artifacts(candidate, ["cowsay"]), reclaim_relpaths=("cowsay.pex",)
++    )
++    assert isinstance(result, Error)
++    shutil.rmtree(candidate, True)
++    # The failed switch restores the complete prior generation: the first generation's scie and
++    # the in-place source PEX are both back.
++    assert "the-pex-2" == _read(os.path.join(dest, "cowsay.pex"))
++    assert "the-scie" == _read(os.path.join(dest, "cowsay"))
++    assert {"cowsay", "cowsay.pex"} == _entry_names(dest)
++
++
++def test_reclaim_collision_noop(tmp_path):
++    dest = str(tmp_path)
++    _write(os.path.join(dest, "cowsay"), "old-same-name")
++    candidate = _make_candidate(dest, {"cowsay": "new-same-name"})
++
++    result = _commit_generation(
++        dest, _artifacts(candidate, ["cowsay"]), reclaim_relpaths=("cowsay",)
++    )
++    assert result is None
++    shutil.rmtree(candidate, True)
++    assert "new-same-name" == _read(os.path.join(dest, "cowsay"))
++    assert {"cowsay"} == _entry_names(dest)
++
++
++def test_verify_generation_ok(tmp_path):
++    candidate = os.path.join(str(tmp_path), "candidate")
++    os.mkdir(candidate)
++    scie_path = _write(os.path.join(candidate, "app"), "binary")
++    sha256 = hashlib.sha256(b"binary").hexdigest()
++    _write(os.path.join(candidate, "app.sha256"), "{hash}  app\n".format(hash=sha256))
++
++    assert _verify_generation((_scie_info(scie_path),), ("sha256",)) is None
++
++
++def test_verify_missing_or_empty(tmp_path):
++    missing = _scie_info(os.path.join(str(tmp_path), "nope"))
++    result = _verify_generation((missing,), ())
++    assert isinstance(result, Error)
++    assert "verification stage" in str(result)
++    assert missing.interpreter.render_description() in str(result)
++
++    empty = os.path.join(str(tmp_path), "empty")
++    _write(empty, "")
++    result = _verify_generation((_scie_info(empty),), ())
++    assert isinstance(result, Error)
++    assert "0 bytes" in str(result)
++
++
++def test_verify_bad_sidecars(tmp_path):
++    candidate = os.path.join(str(tmp_path), "candidate")
++    os.mkdir(candidate)
++    scie_path = _write(os.path.join(candidate, "app"), "binary")
++
++    result = _verify_generation((_scie_info(scie_path),), ("sha256",))
++    assert isinstance(result, Error)
++    assert "sha256" in str(result)
++    assert "missing" in str(result)
++
++    _write(os.path.join(candidate, "app.sha256"), "deadbeef  app\n")
++    result = _verify_generation((_scie_info(scie_path),), ("sha256",))
++    assert isinstance(result, Error)
++    assert "does not match" in str(result)
++    assert hashlib.sha256(b"binary").hexdigest() in str(result)
++
++    sha256 = hashlib.sha256(b"binary").hexdigest()
++    _write(os.path.join(candidate, "app.sha256"), "{hash} *app\n".format(hash=sha256))
++    assert _verify_generation((_scie_info(scie_path),), ("sha256",)) is None
++
++
++def test_concurrent_commit_lock(tmp_path):
++    dest = str(tmp_path)
++    _write(os.path.join(dest, "app-a"), "old-a")
++    _write(os.path.join(dest, "app-b"), "old-b")
++
++    candidate = _make_candidate(dest, {"app-a": "new-a", "app-b": "new-b"})
++
++    # Hold the commit lock externally to stand in for a concurrent publisher mid-switch.
++    held_lock = fs_lock.acquire(os.path.join(dest, _COMMIT_LOCK_NAME), exclusive=True)
++    errors = []
++
++    def commit():
++        try:
++            result = _commit_generation(dest, _artifacts(candidate, ["app-a", "app-b"]))
++            if result is not None:
++                errors.append(result)
++        except Exception as e:
++            errors.append(e)
++
++    thread = threading.Thread(target=commit)
++    thread.start()
++    thread.join(timeout=5.0)
++    assert thread.is_alive(), "Expected the second publisher to block on the commit lock."
++
++    # While the other publisher's switch is in flight only a complete prior generation is visible.
++    assert "old-a" == _read(os.path.join(dest, "app-a"))
++    assert "old-b" == _read(os.path.join(dest, "app-b"))
++
++    held_lock.release()
++    thread.join(timeout=10.0)
++    assert not thread.is_alive()
++    assert [] == errors
++    shutil.rmtree(candidate, True)
++
++    # The waiter then performs its whole switch against the complete prior generation.
++    assert "new-a" == _read(os.path.join(dest, "app-a"))
++    assert "new-b" == _read(os.path.join(dest, "app-b"))
++    assert {"app-a", "app-b"} == _entry_names(dest)
+diff --git a/tests/integration/cli/commands/test_scie_create.py b/tests/integration/cli/commands/test_scie_create.py
+index 98f66667..6ff55bbf 100644
+--- a/tests/integration/cli/commands/test_scie_create.py
++++ b/tests/integration/cli/commands/test_scie_create.py
+@@ -4,11 +4,13 @@
+ from __future__ import absolute_import
+ 
+ import hashlib
++import os
+ import os.path
+ import re
+ import shutil
+ import subprocess
+ import sys
++import time
+ 
+ import pytest
+ 
+@@ -17,15 +19,24 @@ from pex.common import safe_delete
+ from pex.fetcher import URLFetcher
+ from pex.interpreter import PythonInterpreter
+ from pex.layout import Layout
++from pex.os import WINDOWS
+ from pex.pep_440 import Version
++from pex.sysconfig import SysPlatform
+ from pex.typing import TYPE_CHECKING
+-from testing import PY310, PY311, ensure_python_interpreter, make_env, run_pex_command
++from testing import (
++    PY310,
++    PY311,
++    ensure_python_interpreter,
++    installed_pex_wheel_venv_python,
++    make_env,
++    run_pex_command,
++)
+ from testing.cli import run_pex3
+ from testing.pytest_utils.tmp import Tempdir
+ from testing.scie import skip_if_no_provider
+ 
+ if TYPE_CHECKING:
+-    from typing import Any, Optional, Text, Tuple
++    from typing import Any, List, Optional, Text, Tuple
+ 
+ 
+ def test_not_a_pex(tmpdir):
+@@ -343,3 +354,399 @@ def test_pex_file_path_dest(
+     assert not os.path.exists(tmpdir.join("cowsay"))
+     assert not os.path.exists(os.path.join(dest2, "cowsay.pex"))
+     assert b"| Goo! |" in subprocess.check_output(args=[os.path.join(dest2, "cowsay"), "Goo!"])
++
++
++# A deterministic, offline stand-in for the `science` binary. It parses just enough of the
++# `science ... lift build` command line to emit the named scie binary and any requested hash
++# sidecars, and it supports test knobs via environment variables: failing a target platform,
++# writing a bad checksum sidecar, tagging output with a marker and sleeping while building.
++_FAKE_SCIENCE_SCRIPT = r"""
++from __future__ import print_function
++
++import hashlib
++import os
++import sys
++import time
++
++
++def main(argv):
++    if len(argv) == 1 and argv[0] == "--version":
++        print("0.21.0")
++        return 0
++
++    dest_dir = None
++    manifest_path = None
++    hash_algorithms = []
++    use_platform_suffix = None
++    i = 0
++    while i < len(argv):
++        arg = argv[i]
++        if arg == "--dest-dir":
++            dest_dir = argv[i + 1]
++            i += 2
++        elif arg == "--hash":
++            hash_algorithms.append(argv[i + 1])
++            i += 2
++        elif arg == "--cache-dir":
++            i += 2
++        elif arg == "--use-platform-suffix":
++            use_platform_suffix = True
++            i += 1
++        elif arg == "--no-use-platform-suffix":
++            use_platform_suffix = False
++            i += 1
++        elif arg.endswith(".toml"):
++            manifest_path = arg
++            i += 1
++        else:
++            i += 1
++
++    manifest_base = os.path.basename(manifest_path)[: -len(".toml")]
++    app_name, platform = manifest_base.split("-lift-", 1)
++    is_windows_target = platform.startswith("windows")
++
++    fail_platform = os.environ.get("PEX_TEST_FAIL_SCIE_PLATFORM")
++    if fail_platform and platform == fail_platform:
++        print(
++            "fake-science: injected failure for {platform}".format(platform=platform),
++            file=sys.stderr,
++        )
++        return 1
++
++    if os.environ.get("PEX_TEST_SCIE_SLEEP"):
++        time.sleep(float(os.environ["PEX_TEST_SCIE_SLEEP"]))
++
++    if use_platform_suffix:
++        binary = "{name}-{platform}{ext}".format(
++            name=app_name,
++            platform=platform,
++            ext=".exe" if is_windows_target else "",
++        )
++    else:
++        binary = "{name}{ext}".format(
++            name=app_name, ext=".exe" if is_windows_target else ""
++        )
++
++    if not os.path.isdir(dest_dir):
++        os.makedirs(dest_dir)
++    out_path = os.path.join(dest_dir, binary)
++    marker = os.environ.get("PEX_TEST_SCIE_MARKER", "")
++    payload = "fake-scie-binary for {name} on {platform} marker={marker}\n".format(
++        name=app_name, platform=platform, marker=marker
++    ).encode("utf-8")
++    with open(out_path, "wb") as fp:
++        fp.write(payload)
++    for algorithm in hash_algorithms:
++        digest = hashlib.new(algorithm)
++        digest.update(payload)
++        recorded = digest.hexdigest()
++        if os.environ.get("PEX_TEST_BAD_SIDECAR") == platform:
++            recorded = "0" * len(recorded)
++        with open("{out}.{alg}".format(out=out_path, alg=algorithm), "w") as fp:
++            fp.write(
++                "{digest}  {binary}\n".format(digest=recorded, binary=binary)
++            )
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
++"""
++
++
++def _install_fake_science(tmpdir):
++    # type: (Tempdir) -> str
++
++    script = tmpdir.join("fake_science.py")
++    with open(script, "w") as fp:
++        fp.write(_FAKE_SCIENCE_SCRIPT)
++
++    if WINDOWS:
++        launcher = tmpdir.join("fake-science.cmd")
++        with open(launcher, "w") as fp:
++            fp.write(
++                '@echo off\r\n"{python}" "%~dp0fake_science.py" %*\r\n'.format(
++                    python=sys.executable
++                )
++            )
++    else:
++        launcher = tmpdir.join("fake-science")
++        with open(launcher, "w") as fp:
++            fp.write(
++                '#!/bin/sh\nexec "{python}" "$(dirname "$0")/fake_science.py" "$@"\n'.format(
++                    python=sys.executable
++                )
++            )
++        os.chmod(launcher, 0o755)
++    return os.path.basename(launcher)
++
++
++def _build_simple_pex(pex):
++    # type: (str) -> None
++    run_pex_command(args=["-m", "http.server", "-o", pex, "--no-pypi"]).assert_success()
++
++
++def _staging_leftovers(dest):
++    # type: (str) -> List[str]
++    return [
++        name
++        for name in os.listdir(dest)
++        if name.startswith(".~pex-scie-create-") or name.startswith(".~pex-scie-backup-")
++    ]
++
++
++def test_multi_platform_failure_leaves_prior_generation_intact(tmpdir):
++    # type: (Tempdir) -> None
++
++    fake_science = _install_fake_science(tmpdir)
++    pex = tmpdir.join("src", "app.pex")
++    os.makedirs(os.path.dirname(pex))
++    _build_simple_pex(pex)
++
++    dest = tmpdir.join("dest")
++    os.makedirs(dest)
++    foreign_platform = SysPlatform.MACOS_AARCH64
++    current_scie = SysPlatform.CURRENT.qualified_binary_name("app")
++    foreign_scie = foreign_platform.qualified_binary_name("app")
++    with open(os.path.join(dest, current_scie), "w") as fp:
++        fp.write("old-current-generation")
++    with open(os.path.join(dest, foreign_scie), "w") as fp:
++        fp.write("old-foreign-generation")
++
++    result = run_pex3(
++        "scie",
++        "create",
++        "--style",
++        "lazy",
++        "--scie-platform",
++        "current",
++        "--scie-platform",
++        str(foreign_platform),
++        "--scie-hash-alg",
++        "sha256",
++        "--scie-science-binary",
++        fake_science,
++        "-d",
++        dest,
++        pex,
++        cwd=tmpdir.path,
++        env=make_env(PEX_TEST_FAIL_SCIE_PLATFORM=str(foreign_platform)),
++    )
++    result.assert_failure()
++    assert "science build stage" in result.error
++    assert str(foreign_platform) in result.error
++
++    # The complete prior generation is still visible and byte-for-byte intact; no platform from
++    # the failed generation leaked into the destination directory and no staging directories
++    # remain behind.
++    with open(os.path.join(dest, current_scie)) as fp:
++        assert "old-current-generation" == fp.read()
++    with open(os.path.join(dest, foreign_scie)) as fp:
++        assert "old-foreign-generation" == fp.read()
++    # N.B.: The build stage fails before the commit lock is ever taken, so the destination only
++    # contains the prior generation.
++    assert sorted([current_scie, foreign_scie]) == sorted(os.listdir(dest))
++    assert [] == _staging_leftovers(dest)
++
++
++def test_scie_only_reclaims_in_place_source_only_after_successful_commit(tmpdir):
++    # type: (Tempdir) -> None
++
++    fake_science = _install_fake_science(tmpdir)
++    dest = tmpdir.join("dest")
++    os.makedirs(dest)
++    # A single target uses the dynamic, unqualified scie name.
++    current_scie = SysPlatform.CURRENT.binary_name("app")
++
++    pex = os.path.join(dest, "app.pex")
++    _build_simple_pex(pex)
++
++    # A successful whole-generation switch reclaims the in-place source PEX.
++    run_pex3(
++        "scie",
++        "create",
++        "--style",
++        "lazy",
++        "--scie-only",
++        "--scie-science-binary",
++        fake_science,
++        pex,
++        cwd=tmpdir.path,
++    ).assert_success()
++    assert not os.path.exists(pex)
++    assert os.path.isfile(os.path.join(dest, current_scie))
++
++    # When the switch fails the in-place source PEX is restored and no scie is published.
++    _build_simple_pex(pex)
++    result = run_pex3(
++        "scie",
++        "create",
++        "--style",
++        "lazy",
++        "--scie-only",
++        "--scie-science-binary",
++        fake_science,
++        pex,
++        cwd=tmpdir.path,
++        env=make_env(PEX_TEST_FAIL_SCIE_PLATFORM=str(SysPlatform.CURRENT)),
++    )
++    result.assert_failure()
++    assert os.path.isfile(pex)
++    assert [] == _staging_leftovers(dest)
++
++
++def test_checksum_sidecar_verification_failure_aborts_switch(tmpdir):
++    # type: (Tempdir) -> None
++
++    fake_science = _install_fake_science(tmpdir)
++    pex = tmpdir.join("src", "app.pex")
++    os.makedirs(os.path.dirname(pex))
++    _build_simple_pex(pex)
++
++    dest = tmpdir.join("dest")
++    os.makedirs(dest)
++    current_scie = SysPlatform.CURRENT.qualified_binary_name("app")
++    old_sidecar = "{scie}.sha256".format(scie=current_scie)
++    with open(os.path.join(dest, current_scie), "w") as fp:
++        fp.write("old-current-generation")
++    with open(os.path.join(dest, old_sidecar), "w") as fp:
++        fp.write("old-sidecar")
++
++    result = run_pex3(
++        "scie",
++        "create",
++        "--style",
++        "lazy",
++        "--scie-hash-alg",
++        "sha256",
++        "--scie-science-binary",
++        fake_science,
++        "-d",
++        dest,
++        pex,
++        cwd=tmpdir.path,
++        env=make_env(PEX_TEST_BAD_SIDECAR=str(SysPlatform.CURRENT)),
++    )
++    result.assert_failure()
++    assert "verification stage" in result.error
++    assert str(SysPlatform.CURRENT) in result.error
++
++    with open(os.path.join(dest, current_scie)) as fp:
++        assert "old-current-generation" == fp.read()
++    with open(os.path.join(dest, old_sidecar)) as fp:
++        assert "old-sidecar" == fp.read()
++    # Verification fails before the commit lock is taken, so only the prior generation remains.
++    assert sorted([current_scie, old_sidecar]) == sorted(os.listdir(dest))
++    assert [] == _staging_leftovers(dest)
++
++
++def test_concurrent_publishers_commit_one_complete_generation(tmpdir):
++    # type: (Tempdir) -> None
++
++    fake_science = _install_fake_science(tmpdir)
++    pex = tmpdir.join("src", "app.pex")
++    os.makedirs(os.path.dirname(pex))
++    _build_simple_pex(pex)
++
++    dest = tmpdir.join("dest")
++    os.makedirs(dest)
++
++    foreign_platform = SysPlatform.MACOS_AARCH64
++    current_scie = SysPlatform.CURRENT.qualified_binary_name("app")
++    foreign_scie = foreign_platform.qualified_binary_name("app")
++
++    python = installed_pex_wheel_venv_python(sys.executable)
++    args = [
++        "-m",
++        "pex.cli",
++        "scie",
++        "create",
++        "--style",
++        "lazy",
++        "--scie-platform",
++        "current",
++        "--scie-platform",
++        str(foreign_platform),
++        "--scie-science-binary",
++        fake_science,
++        "-d",
++        dest,
++        pex,
++    ]
++
++    processes = []
++    for marker in ("AAA", "BBB"):
++        env = make_env(PEX_TEST_SCIE_MARKER=marker, PEX_TEST_SCIE_SLEEP="1.5")
++        processes.append(
++            subprocess.Popen(
++                args=[python] + args,
++                cwd=tmpdir.path,
++                env=env,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE,
++            )
++        )
++        time.sleep(0.5)
++
++    for process in processes:
++        stdout, stderr = process.communicate()
++        assert 0 == process.returncode, stderr.decode("utf-8")
++
++    def marker_of(name):
++        # type: (str) -> object
++        with open(os.path.join(dest, name)) as fp:
++            match = re.search(r"marker=(\S+)", fp.read())
++        assert match is not None
++        return match.group(1)
++
++    # Both processes published the same-named set concurrently; the destination must hold one
++    # self-consistent generation rather than a mix of the two candidates.
++    current_marker = marker_of(current_scie)
++    foreign_marker = marker_of(foreign_scie)
++    assert current_marker == foreign_marker
++    assert current_marker in ("AAA", "BBB")
++    assert [] == _staging_leftovers(dest)
++    assert sorted(["app.pex", current_scie, foreign_scie, ".~pex-scie-create.lck"]) == sorted(
++        os.listdir(dest)
++    )
++
++
++def test_platform_parent_dir_naming_commits_through_candidate(tmpdir):
++    # type: (Tempdir) -> None
++
++    fake_science = _install_fake_science(tmpdir)
++    pex = tmpdir.join("src", "app.pex")
++    os.makedirs(os.path.dirname(pex))
++    _build_simple_pex(pex)
++
++    dest = tmpdir.join("dest")
++    os.makedirs(dest)
++    foreign_platform = SysPlatform.MACOS_AARCH64
++
++    run_pex3(
++        "scie",
++        "create",
++        "--style",
++        "lazy",
++        "--scie-platform",
++        "current",
++        "--scie-platform",
++        str(foreign_platform),
++        "--scie-name-style",
++        "platform-parent-dir",
++        "--scie-science-binary",
++        fake_science,
++        "-d",
++        dest,
++        pex,
++        cwd=tmpdir.path,
++    ).assert_success()
++
++    assert os.path.isfile(
++        os.path.join(dest, str(SysPlatform.CURRENT), SysPlatform.CURRENT.binary_name("app"))
++    )
++    assert os.path.isfile(
++        os.path.join(dest, str(foreign_platform), foreign_platform.binary_name("app"))
++    )
++    assert os.path.isfile(os.path.join(dest, "app.pex"))
++    assert [] == _staging_leftovers(dest)
