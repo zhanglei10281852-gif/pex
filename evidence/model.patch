@@ -1,0 +1,2552 @@
+diff --git a/evidence/rubric-comparison-report.txt b/evidence/rubric-comparison-report.txt
+new file mode 100644
+index 00000000..65bf219e
+--- /dev/null
++++ b/evidence/rubric-comparison-report.txt
+@@ -0,0 +1,9 @@
++项目：pex-tool-pex-fe35b743-6b18-4db0-a090-8a14e50ff18a｜Session：6ae942ebe498b5216ff88860｜结论：部分完成
++Rubric ID：1｜状态：通过｜期望行为：并发启动只有一个调用创建后台进程，其他调用复用同一 URL。｜实际观察：launch 在进程级文件锁内检查、回收、启动和发布，第二个调用只能在首个调用发布后读取 VALID 记录。｜直接证据：pex/http/server.py:332-388；测试轨迹记录真实双进程并发用例通过。
++Rubric ID：2｜状态：未通过｜期望行为：损坏或陈旧 pidfile、退出进程和无关程序复用 PID 不会被报告为服务器或被误杀。｜实际观察：pidfile 未记录进程启动时间时，只要记录的服务地址可访问，状态检查直接判定有效；复现将未含启动时间的外部 HTTP 服务写入 pidfile 后，运行查询将其报告为当前实例，关闭命令随后终止该外部进程。｜直接证据：复现输出“已报告运行中”为真且“外部进程仍存活”为假。｜原因：状态检查把服务地址可访问当作充分身份依据，没有要求进程启动时间验证。｜影响：旧格式或伪造记录会把无关可访问进程当作文档服务器并将其关闭。｜证据位置：pex/http/server.py:177-198、555-594；/tmp/p4_repro.py
++Rubric ID：3｜状态：通过｜期望行为：关闭只终止同一代服务器，等待退出并清理对应状态，启动关闭交错不影响新代。｜实际观察：启动与关闭共享状态锁；关闭在锁内重新读取 token 和身份、等待退出，Pidfile.discard 仅删除 token 匹配记录。｜直接证据：pex/http/server.py:152-174、332-347、555-595。
++Rubric ID：4｜状态：通过｜期望行为：未就绪、超时或状态写入失败不留下运行假记录，保留日志并允许重试。｜实际观察：pidfile 只在 URL 可达后原子发布；发布或验证失败进入 _abort 终止子进程，日志位于代次文件且不在失败清理中删除。｜直接证据：pex/http/server.py:414-542。
++Rubric ID：5｜状态：未通过｜期望行为：--server-info 只返回身份与可达性均验证的当前实例，浏览器只在提交后打开。｜实际观察：服务器信息查询直接复用运行状态；pidfile 未记录进程启动时间时，只要记录的服务地址可访问，运行状态就将外部服务报告为当前实例。｜直接证据：复现输出“已报告运行中”为真；pex/cli/commands/docs.py:43-53。｜原因：运行状态依赖的身份检查对缺失启动时间字段的可达服务判定有效。｜影响：服务器信息查询会展示未经进程身份验证的服务地址与进程号。｜证据位置：pex/http/server.py:177-203、357-364；pex/cli/commands/docs.py:43-53
++Rubric ID：6｜状态：通过｜期望行为：标准端口失败后临时端口回退、--no-open、无实例关闭及无内嵌文档提示兼容。｜实际观察：CLI 接口与 serve_html_docs 调用语义未移除，新增测试覆盖无文档提示与端口回退；无 pidfile 的 shutdown 返回 None。｜直接证据：tests/test_http_server.py:286-367；pex/http/server.py:555-566。
++
++关键原始证据摘要：服务身份复现确认运行查询报告实例，关闭命令实际终止外部 HTTP 服务；锁、代次删除和启动失败清理代码路径完成审计。
+diff --git a/evidence/screenshots/01-rubric-comparison.png b/evidence/screenshots/01-rubric-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0d0621f968541a61e91753dc7460cd5f0a5eeff
+GIT binary patch
+literal 67199
+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
+F{|Oj3YXtxR
+
+literal 0
+HcmV?d00001
+
+diff --git a/evidence/verify-rubric.yaml b/evidence/verify-rubric.yaml
+new file mode 100644
+index 00000000..0b9d45e6
+--- /dev/null
++++ b/evidence/verify-rubric.yaml
+@@ -0,0 +1,19 @@
++rubrics:
++  - id: 1
++    type: f2p
++    text: "并发启动同一文档服务时只有一个调用创建并发布后台进程，其他调用等待后复用同一可访问 URL。"
++  - id: 2
++    type: f2p
++    text: "损坏或陈旧的 pidfile、已退出进程和被无关程序复用的 PID 不会被报告为文档服务器，也不会被 --kill-server 误杀。"
++  - id: 3
++    type: f2p
++    text: "关闭只终止再次确认属于同一代的服务器，等待其退出并清理对应状态；启动与关闭交错不会影响后来发布的新代。"
++  - id: 4
++    type: f2p
++    text: "子进程未就绪、启动超时或状态写入失败时不会留下运行中假记录，日志被保留且后续启动可以重新尝试。"
++  - id: 5
++    type: f2p
++    text: "--server-info 只返回经过进程身份和服务可达性验证的当前实例，浏览器只在实例完成提交后打开。"
++  - id: 6
++    type: p2p
++    text: "标准端口失败后的临时端口回退、--no-open、无实例时的关闭结果以及缺少内嵌文档时的远程提示保持既有行为。"
+diff --git a/pex/cli/commands/docs.py b/pex/cli/commands/docs.py
+index 97f7000e..b5648390 100644
+--- a/pex/cli/commands/docs.py
++++ b/pex/cli/commands/docs.py
+@@ -44,10 +44,12 @@ class Docs(BuildTimeCommand):
+         # type: () -> Result
+ 
+         if self.options.server_info:
+-            pidfile = server.pidfile()
+-            if pidfile and pidfile.alive():
++            pidfile = server.running()
++            if pidfile:
+                 return Ok(
+-                    "{server} serving {info}".format(server=server.name, info=pidfile.server_info)
++                    "{server} serving {info}".format(
++                        server=server.name, info=pidfile.server_info
++                    )
+                 )
+             return Ok("No {server} is running.".format(server=server.name))
+ 
+diff --git a/pex/http/server.py b/pex/http/server.py
+index 73b4b4a6..c7474061 100644
+--- a/pex/http/server.py
++++ b/pex/http/server.py
+@@ -1,27 +1,41 @@
+ # Copyright 2024 Pex project contributors.
+ # Licensed under the Apache License, Version 2.0 (see LICENSE).
+ 
++from __future__ import absolute_import
++
++import glob
+ import json
+ import logging
+ import os
+ import re
+-import signal
+ import subprocess
+ import sys
+ import time
+-
+-from pex.common import safe_open
+-from pex.os import is_alive, kill
++from contextlib import contextmanager
++from uuid import uuid4
++
++from pex.common import safe_delete, safe_mkdir, safe_open, safe_sleep
++from pex.enum import Enum
++from pex.fs import lock as fs_lock
++from pex.fs import safe_rename
++from pex.os import is_alive, kill, process_start_time, terminate
+ from pex.subprocess import launch_python_daemon
+ from pex.typing import TYPE_CHECKING
+ 
+ if TYPE_CHECKING:
+-    from typing import Optional
++    from typing import Iterator, Optional
+ 
+     import attr  # vendor:skip
+ else:
+     from pex.third_party import attr
+ 
++if sys.version_info[0] == 3:
++    from http.client import HTTPConnection, HTTPException
++    from urllib.parse import urlsplit
++else:
++    from httplib import HTTPConnection, HTTPException
++    from urlparse import urlsplit
++
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -30,18 +44,50 @@ logger = logging.getLogger(__name__)
+ class ServerInfo(object):
+     url = attr.ib()  # type: str
+     pid = attr.ib()  # type: int
++    # A unique generation token assigned when a server process is spawned. A record only ever
++    # describes the generation that published it, which allows shutdown and stale-state cleanup to
++    # avoid acting on a later generation that republished the same pidfile.
++    token = attr.ib(default=None)  # type: Optional[str]
++    # The process start time captured at launch; used to detect a recycled PID that now belongs to
++    # an unrelated process. `None` for records written by older Pex versions (or platforms where
++    # the start time cannot be determined).
++    start_time = attr.ib(default=None)  # type: Optional[str]
++    # The log file the server process writes to.
++    log = attr.ib(default=None)  # type: Optional[str]
+ 
+     def __str__(self):
+         # type: () -> str
+         return "{url} @ {pid}".format(url=self.url, pid=self.pid)
+ 
+ 
++class PidStatus(Enum["PidStatus.Value"]):
++    class Value(Enum.Value):
++        pass
++
++    # The recorded process is alive, provably ours, and serving the recorded URL.
++    VALID = Value("valid")
++    # No process exists with the recorded PID.
++    DEAD = Value("dead")
++    # A process with the recorded PID exists but is a different process (the PID was recycled).
++    FOREIGN = Value("foreign")
++    # The recorded process is provably ours (start time matched) but no longer serves the URL.
++    UNREACHABLE = Value("unreachable")
++    # A process with the recorded PID is alive and not serving, but its identity could not be
++    # established (no start time recorded or it could not be queried); it must never be signaled.
++    UNKNOWN = Value("unknown")
++
++
++PidStatus.seal()
++
++
+ @attr.s(frozen=True)
+ class Pidfile(object):
++    PIDFILE_NAME = "pidfile"
++
+     @staticmethod
+-    def _pidfile(cache_dir):
++    def pidfile_path(cache_dir):
+         # type: (str) -> str
+-        return os.path.join(cache_dir, "pidfile")
++        return os.path.join(cache_dir, Pidfile.PIDFILE_NAME)
+ 
+     @classmethod
+     def load(
+@@ -50,12 +96,19 @@ class Pidfile(object):
+         cache_dir,  # type: str
+     ):
+         # type: (...) -> Optional[Pidfile]
+-        pidfile = cls._pidfile(cache_dir)
++        pidfile = cls.pidfile_path(cache_dir)
+         try:
+             with open(pidfile) as fp:
+                 data = json.load(fp)
+-            return cls(ServerInfo(url=data["url"], pid=data["pid"]))
+-        except (OSError, IOError, ValueError, KeyError) as e:
++            server_info = ServerInfo(
++                url=data["url"],
++                pid=int(data["pid"]),
++                token=data.get("token"),
++                start_time=(str(data["start_time"]) if data.get("start_time") is not None else None),
++                log=data.get("log"),
++            )
++            return cls(server_info=server_info)
++        except (OSError, IOError, ValueError, KeyError, TypeError) as e:
+             logger.debug(
+                 "Failed to load {server} pid file from {path}: {err}".format(
+                     server=server_name, path=pidfile, err=e
+@@ -63,10 +116,121 @@ class Pidfile(object):
+             )
+             return None
+ 
++    @classmethod
++    def publish(
++        cls,
++        cache_dir,  # type: str
++        server_info,  # type: ServerInfo
++    ):
++        # type: (...) -> Pidfile
++        # Atomically publish the ready record so concurrent readers and competing starters only
++        # ever observe either no record or a complete committed record (never a partially written
++        # "running" record).
++        pidfile = cls.pidfile_path(cache_dir)
++        tmp = "{pidfile}.{token}.tmp".format(pidfile=pidfile, token=server_info.token or uuid4().hex)
++        try:
++            with safe_open(tmp, "w") as fp:
++                json.dump(
++                    dict(
++                        url=server_info.url,
++                        pid=server_info.pid,
++                        token=server_info.token,
++                        start_time=server_info.start_time,
++                        log=server_info.log,
++                    ),
++                    fp,
++                    indent=2,
++                    sort_keys=True,
++                )
++            safe_rename(tmp, pidfile)
++        except (OSError, IOError, ValueError):
++            safe_delete(tmp)
++            raise
++        return cls(server_info=server_info)
++
++    @classmethod
++    def discard(
++        cls,
++        server_name,  # type: str
++        cache_dir,  # type: str
++        token=None,  # type: Optional[str]
++    ):
++        # type: (...) -> bool
++        # Generation guarded compare-and-delete: remove the pidfile only when the record currently
++        # on disk is still the generation the caller read. A newer generation that republished in
++        # the meantime is never deleted by an old caller.
++        current = cls.load(server_name, cache_dir)
++        if current is None:
++            if not os.path.exists(cls.pidfile_path(cache_dir)):
++                return False
++            # A corrupt record cannot carry a generation to check; only an unguarded reclaim may
++            # remove one.
++            if token is not None:
++                return False
++        elif token is not None and current.server_info.token != token:
++            return False
++        safe_delete(cls.pidfile_path(cache_dir))
++        return True
++
++    server_info = attr.ib()  # type: ServerInfo
++
++    def status(self, connect_timeout=1.0):
++        # type: (float) -> PidStatus.Value
++
++        if not is_alive(self.server_info.pid):
++            return PidStatus.DEAD
++
++        # Establish process identity positively: both a start time captured at launch and a
++        # freshly queried start time that matches. This rules out a recycled PID.
++        identity_verified = False
++        if self.server_info.start_time:
++            actual_start_time = process_start_time(self.server_info.pid)
++            if actual_start_time is not None:
++                if actual_start_time != self.server_info.start_time:
++                    return PidStatus.FOREIGN
++                identity_verified = True
++
++        if not self.is_url_serving(self.server_info.url, timeout=connect_timeout):
++            # Only terminate a non-serving process whose identity was positively verified;
++            # otherwise leave the possibly-unrelated live process alone and just drop the record.
++            return PidStatus.UNREACHABLE if identity_verified else PidStatus.UNKNOWN
++
++        return PidStatus.VALID
++
++    def is_current(self, connect_timeout=1.0):
++        # type: (float) -> bool
++        return self.status(connect_timeout=connect_timeout) is PidStatus.VALID
++
++    @staticmethod
++    def is_url_serving(
++        url,  # type: str
++        timeout=1.0,  # type: float
++    ):
++        # type: (...) -> bool
++        split = urlsplit(url)
++        hostname = split.hostname or "localhost"
++        port = split.port
++        if port is None:
++            port = 443 if split.scheme == "https" else 80
++        # The server binds all interfaces; probe IPv4 loopback directly so reachability does not
++        # depend on how "localhost" resolves (127.0.0.1 vs ::1).
++        probe_host = "127.0.0.1" if hostname in ("localhost",) else hostname
++        connection = HTTPConnection(probe_host, port, timeout=timeout)
++        try:
++            try:
++                connection.request("HEAD", "/")
++                response = connection.getresponse()
++                response.read()
++            finally:
++                connection.close()
++            return True
++        except (OSError, IOError, HTTPException) as e:
++            logger.debug("The server at {url} is not serving: {err}".format(url=url, err=e))
++            return False
++
+     @staticmethod
+     def _read_url(
+         server_log,  # type: str
+-        timeout,  # type: float
+     ):
+         # type: (...) -> Optional[str]
+ 
+@@ -75,45 +239,16 @@ class Pidfile(object):
+         #  3.5: Serving HTTP on 0.0.0.0 port 45577 ... -mhttp.server
+         # 3.6+: Serving HTTP on 0.0.0.0 port 33539 (http://0.0.0.0:33539/) ... -mhttp.server
+ 
+-        start = time.time()
+-        while time.time() - start < timeout:
++        try:
+             with open(server_log) as fp:
+                 for line in fp:
+                     if line.endswith(("\r", "\n")):
+                         match = re.search(r"Serving HTTP on \S+ port (?P<port>\d+)", line)
+                         if match:
+-                            port = match.group("port")
+-                            return "http://localhost:{port}".format(port=port)
+-        return None
+-
+-    @classmethod
+-    def record(
+-        cls,
+-        cache_dir,  # type: str
+-        server_log,  # type: str
+-        pid,  # type: int
+-        timeout=5.0,  # type: float
+-    ):
+-        # type: (...) -> Optional[Pidfile]
+-        url = cls._read_url(server_log, timeout)
+-        if not url:
++                            return "http://localhost:{port}".format(port=match.group("port"))
++        except (OSError, IOError):
+             return None
+-
+-        pidfile = cls._pidfile(cache_dir)
+-        with safe_open(pidfile, "w") as fp:
+-            json.dump(dict(url=url, pid=pid), fp, indent=2, sort_keys=True)
+-        return cls(ServerInfo(url=url, pid=pid))
+-
+-    server_info = attr.ib()  # type: ServerInfo
+-
+-    def alive(self):
+-        # type: () -> bool
+-        # TODO(John Sirois): Handle pid rollover
+-        return is_alive(self.server_info.pid)
+-
+-    def kill(self):
+-        # type: () -> None
+-        os.kill(self.server_info.pid, signal.SIGTERM)
++        return None
+ 
+ 
+ @attr.s(frozen=True)
+@@ -146,15 +281,88 @@ class LaunchError(Exception):
+         return "\n".join(lines)
+ 
+ 
++def _terminate_and_wait(
++    pid,  # type: int
++    timeout,  # type: float
++    poll_interval=0.1,  # type: float
++):
++    # type: (...) -> bool
++
++    try:
++        terminate(pid)
++    except OSError:
++        # The process may have exited after it was verified alive but before the signal was sent
++        # (POSIX reports ESRCH for this and OpenProcess fails for a dead PID on Windows).
++        if not is_alive(pid):
++            return True
++        raise
++
++    deadline = time.time() + timeout
++    while time.time() < deadline:
++        if not is_alive(pid):
++            return True
++        safe_sleep(poll_interval)
++
++    # The process ignored / did not respond to the termination signal; escalate.
++    if is_alive(pid):
++        try:
++            kill(pid)
++        except OSError:
++            return not is_alive(pid)
++        deadline = time.time() + timeout
++        while time.time() < deadline:
++            if not is_alive(pid):
++                return True
++            safe_sleep(poll_interval)
++
++    return not is_alive(pid)
++
++
+ @attr.s(frozen=True)
+ class Server(object):
+     name = attr.ib()  # type: str
+     cache_dir = attr.ib()  # type: str
+ 
++    _LOCK_NAME = "lock"
++    _LOG_DIR_NAME = "logs"
++    # Bound on how many per-launch log files are retained; only older logs are swept, so the log
++    # of a just-failed launch is always still locatable.
++    _LOGS_TO_KEEP = 5
++
++    def _lock_path(self):
++        # type: () -> str
++        return os.path.join(self.cache_dir, self._LOCK_NAME)
++
++    @contextmanager
++    def _locked(self):
++        # type: () -> Iterator[None]
++        # All state-changing operations are serialized so that exactly one competing starter can
++        # spawn a generation, and shutdown never acts mid-publish. Both flock (POSIX) and
++        # LockFileEx (Windows) are released automatically by the OS if a holder dies, so a crashed
++        # holder can never cause a long-term block.
++        file_lock = fs_lock.acquire(self._lock_path(), exclusive=True)
++        try:
++            yield
++        finally:
++            file_lock.release()
++
++    def _log_dir(self):
++        # type: () -> str
++        return os.path.join(self.cache_dir, self._LOG_DIR_NAME)
++
+     def pidfile(self):
+         # type: () -> Optional[Pidfile]
+         return Pidfile.load(self.name, self.cache_dir)
+ 
++    def running(self, connect_timeout=1.0):
++        # type: (float) -> Optional[Pidfile]
++        # Lock-free observation: atomic publish means a loaded record is always complete, and the
++        # record is only reported when the instance is verifiably alive and serving here and now.
++        pidfile = Pidfile.load(self.name, self.cache_dir)
++        if pidfile and pidfile.status(connect_timeout=connect_timeout) is PidStatus.VALID:
++            return pidfile
++        return None
++
+     def launch(
+         self,
+         document_root,  # type: str
+@@ -164,56 +372,224 @@ class Server(object):
+     ):
+         # type: (...) -> LaunchResult
+ 
+-        pidfile = self.pidfile()
+-        if pidfile and pidfile.alive():
+-            return LaunchResult(server_info=pidfile.server_info, already_running=True)
++        with self._locked():
++            pidfile = Pidfile.load(self.name, self.cache_dir)
++            if pidfile is not None:
++                status = pidfile.status()
++                if status is PidStatus.VALID:
++                    return LaunchResult(server_info=pidfile.server_info, already_running=True)
++                self._reclaim(pidfile, status)
++            elif os.path.exists(Pidfile.pidfile_path(self.cache_dir)):
++                # Corrupt or unreadable record; identity cannot be confirmed, so just drop it.
++                logger.debug("Discarding corrupt {server} pid file.".format(server=self.name))
++                safe_delete(Pidfile.pidfile_path(self.cache_dir))
++
++            return self._spawn(
++                document_root, port=port, timeout=timeout, verbose_error=verbose_error
++            )
++
++    def _reclaim(
++        self,
++        pidfile,  # type: Pidfile
++        status,  # type: PidStatus.Value
++    ):
++        # type: (...) -> None
++        info = pidfile.server_info
++        if status is PidStatus.UNREACHABLE:
++            # The PID is alive and is provably our process, but it is no longer serving; terminate
++            # the broken instance before retrying. A DEAD process needs no signal and neither a
++            # FOREIGN process (recycled PID) nor an UNKNOWN one (unverified identity) is signaled.
++            logger.debug(
++                "Terminating defunct {server} {info}".format(server=self.name, info=info)
++            )
++            _terminate_and_wait(info.pid, timeout=5.0)
++        else:
++            logger.debug(
++                "Discarding stale {server} record {info} ({status})".format(
++                    server=self.name, info=info, status=status
++                )
++            )
++        Pidfile.discard(self.name, self.cache_dir, info.token)
++
++    def _spawn(
++        self,
++        document_root,  # type: str
++        port,  # type: int
++        timeout,  # type: float
++        verbose_error,  # type: bool
++    ):
++        # type: (...) -> LaunchResult
++
++        self._sweep_stale_logs()
++
++        token = uuid4().hex
++        log = os.path.join(self._log_dir(), "{token}.log".format(token=token))
+ 
+         # Not proper daemonization, but good enough.
+-        log = os.path.join(self.cache_dir, "log.txt")
+         http_server_module = "http.server" if sys.version_info[0] == 3 else "SimpleHTTPServer"
+         env = os.environ.copy()
+         # N.B.: We set up line buffering for the process pipes as well as the underlying Python
+-        # running the http server to ensure we can observe the `Serving HTTP on ...` line we need to
+-        # grab the ephemeral port chosen.
++        # running the http server to ensure we can observe the `Serving HTTP on ...` line we need
++        # to grab the ephemeral port chosen.
+         env.update(PYTHONUNBUFFERED="1")
+-        with safe_open(log, "w") as fp:
+-            process = launch_python_daemon(
+-                args=[sys.executable, "-m", http_server_module, str(port)],
+-                env=env,
+-                cwd=document_root,
+-                # N.B.: Line buffering under Python 3 requires both bufsize=1 and
+-                # universal_newlines=True.
+-                bufsize=1,
+-                universal_newlines=True,
+-                stdout=fp.fileno(),
+-                stderr=subprocess.STDOUT,
++        try:
++            with safe_open(log, "w") as fp:
++                process = launch_python_daemon(
++                    args=[sys.executable, "-m", http_server_module, str(port)],
++                    env=env,
++                    cwd=document_root,
++                    # N.B.: Line buffering under Python 3 requires both bufsize=1 and
++                    # universal_newlines=True.
++                    bufsize=1,
++                    universal_newlines=True,
++                    stdout=fp.fileno(),
++                    stderr=subprocess.STDOUT,
++                )
++        except OSError as e:
++            raise LaunchError(
++                log,
++                additional_msg="Failed to spawn the server process: {err}".format(err=e),
++                verbose=verbose_error,
+             )
+ 
+-        pidfile = Pidfile.record(
+-            cache_dir=self.cache_dir, server_log=log, pid=process.pid, timeout=timeout
+-        )
+-        if not pidfile:
++        try:
++            url = self._wait_for_ready(process, log, timeout)
++            server_info = ServerInfo(
++                url=url,
++                pid=process.pid,
++                token=token,
++                start_time=process_start_time(process.pid),
++                log=log,
++            )
+             try:
+-                kill(process.pid)
+-            except OSError as e:
++                pidfile = Pidfile.publish(self.cache_dir, server_info)
++            except (OSError, IOError, ValueError) as e:
+                 raise LaunchError(
+                     log,
+                     additional_msg=(
+-                        "Also failed to kill the partially launched server at pid {pid}: "
+-                        "{err}".format(pid=process.pid, err=e)
++                        "The server started but its ready record could not be written: {err}".format(
++                            err=e
++                        )
+                     ),
+                     verbose=verbose_error,
+                 )
+-            raise LaunchError(log, verbose=verbose_error)
+-        return LaunchResult(server_info=pidfile.server_info, already_running=False)
+ 
+-    def shutdown(self):
+-        # type: () -> Optional[ServerInfo]
++            if pidfile.status() is not PidStatus.VALID:
++                # Never leave a record claiming a server that cannot be verified.
++                Pidfile.discard(self.name, self.cache_dir, token)
++                raise LaunchError(
++                    log,
++                    additional_msg="The server became unavailable before it was committed.",
++                    verbose=verbose_error,
++                )
++
++            return LaunchResult(server_info=server_info, already_running=False)
++        except LaunchError:
++            # No verified ready record has been published (or it was just discarded above), so
++            # kill the partially launched process and leave no fake "running" state. The log file
++            # itself is retained and referenced by the propagated LaunchError.
++            self._abort(process)
++            raise
+ 
+-        pidfile = self.pidfile()
+-        if not pidfile or not pidfile.alive():
+-            return None
++    def _wait_for_ready(
++        self,
++        process,  # type: subprocess.Popen
++        log,  # type: str
++        timeout,  # type: float
++    ):
++        # type: (...) -> str
++        deadline = time.time() + timeout
++        while True:
++            returncode = process.poll()
++            if returncode is not None:
++                raise LaunchError(
++                    log,
++                    additional_msg=(
++                        "The server process exited with code {code} before reporting its address.".format(
++                            code=returncode
++                        )
++                    ),
++                )
+ 
+-        logger.debug("Killing {server} {info}".format(server=self.name, info=pidfile.server_info))
+-        pidfile.kill()
+-        return pidfile.server_info
++            url = Pidfile._read_url(log)
++            if url is not None and Pidfile.is_url_serving(
++                url, timeout=min(1.0, max(0.0, deadline - time.time()))
++            ):
++                return url
++
++            if time.time() >= deadline:
++                raise LaunchError(
++                    log,
++                    additional_msg=(
++                        "Timed out after {timeout} second(s) waiting for the server to report its "
++                        "address.".format(timeout=timeout)
++                    ),
++                )
++            safe_sleep(0.05)
++
++    @staticmethod
++    def _abort(process):
++        # type: (subprocess.Popen) -> None
++        # Kill a partially launched server; no ready record has been (or remains) published.
++        if process.poll() is None:
++            try:
++                kill(process.pid)
++            except OSError:
++                pass
++        deadline = time.time() + 5.0
++        while process.poll() is None and time.time() < deadline:
++            safe_sleep(0.05)
++
++    def _sweep_stale_logs(self):
++        # type: () -> None
++        log_dir = self._log_dir()
++        safe_mkdir(log_dir)
++        logs = glob.glob(os.path.join(log_dir, "*.log"))
++        if len(logs) <= self._LOGS_TO_KEEP:
++            return
++        for stale_log in sorted(logs, key=lambda path: os.path.getmtime(path))[
++            : len(logs) - self._LOGS_TO_KEEP
++        ]:
++            safe_delete(stale_log)
++
++    def shutdown(self, timeout=10.0):
++        # type: (float) -> Optional[ServerInfo]
++
++        with self._locked():
++            pidfile = Pidfile.load(self.name, self.cache_dir)
++            if pidfile is None:
++                # A corrupt record is not an instance to shut down; just clear it so the next
++                # launch is not blocked.
++                if os.path.exists(Pidfile.pidfile_path(self.cache_dir)):
++                    safe_delete(Pidfile.pidfile_path(self.cache_dir))
++                return None
++
++            status = pidfile.status()
++            info = pidfile.server_info
++            if (
++                status is PidStatus.DEAD
++                or status is PidStatus.FOREIGN
++                or status is PidStatus.UNKNOWN
++            ):
++                # The process is gone, the PID was recycled, or its identity cannot be proven:
++                # only the stale record is removed and a live foreign/unverified process is never
++                # signaled.
++                logger.debug(
++                    "Clearing stale {server} record {info} ({status})".format(
++                        server=self.name, info=info, status=status
++                    )
++                )
++                Pidfile.discard(self.name, self.cache_dir, info.token)
++                return None
++
++            # status() above just reconfirmed the process identity (and reachability for VALID)
++            # for the exact generation we read; terminate, wait for actual exit and only then
++            # remove *that* generation's record.
++            logger.debug("Killing {server} {info}".format(server=self.name, info=info))
++            if not _terminate_and_wait(info.pid, timeout=timeout):
++                raise OSError(
++                    "The {server} process with pid {pid} did not exit after being asked to "
++                    "terminate.".format(server=self.name, pid=info.pid)
++                )
++            Pidfile.discard(self.name, self.cache_dir, info.token)
++            return info
+diff --git a/pex/os.py b/pex/os.py
+index 985179b4..950cf4f1 100644
+--- a/pex/os.py
++++ b/pex/os.py
+@@ -11,7 +11,7 @@ from pex.enum import Enum
+ from pex.typing import TYPE_CHECKING
+ 
+ if TYPE_CHECKING:
+-    from typing import Any, List, NoReturn, Text, Tuple, Union
++    from typing import Any, List, NoReturn, Optional, Text, Tuple, Union
+ 
+ 
+ class _CurrentOs(object):
+@@ -68,6 +68,16 @@ HOME_ENV_VAR = "USERPROFILE" if WINDOWS else "HOME"
+ 
+ if WINDOWS:
+ 
++    import ctypes
++    from ctypes.wintypes import DWORD
++
++    # See: https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime
++    class _FILETIME(ctypes.Structure):
++        _fields_ = [
++            ("dwLowDateTime", DWORD),
++            ("dwHighDateTime", DWORD),
++        ]
++
+     def safe_execv(argv):
+         # type: (Union[List[str], Tuple[str, ...]]) -> NoReturn
+ 
+@@ -219,7 +229,7 @@ if WINDOWS:
+         global _TP
+         if _TP is None:
+             # https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
+-            tp = ctypes.windll.kernel32.OpenProcess  # type: ignore[attr-defined]
++            tp = ctypes.windll.kernel32.TerminateProcess  # type: ignore[attr-defined]
+             tp.argtypes = (
+                 HANDLE,  # hProcess
+                 UINT,  # uExitCode
+@@ -229,10 +239,91 @@ if WINDOWS:
+ 
+         if not _TP(phandle, 1):
+             # TODO(John Sirois): Review literature / experiment and don't raise if this just means
+-            #  the process is already dead (may need to consult GetLastError).
++            # the process is already dead (may need to consult GetLastError).
+             #  See: https://github.com/pex-tool/pex/issues/2670
+             raise ctypes.WinError()  # type: ignore[attr-defined]
+ 
++    # https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights
++    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
++
++    _GPT = None  # type: Any
++
++    def process_start_time(pid):
++        # type: (int) -> Optional[str]
++
++        import ctypes
++        from ctypes.wintypes import BOOL, DWORD, HANDLE
++
++        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
++
++        # N.B.: ctypes returns a shared, cached function object whose argtypes can be redefined by
++        # other callers, so pin the prototype on each invocation.
++        open_process = kernel32.OpenProcess
++        open_process.argtypes = (DWORD, BOOL, DWORD)
++        open_process.restype = HANDLE
++        phandle = open_process(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
++        if not phandle:
++            # The process is gone or cannot be queried.
++            return None
++
++        try:
++            global _GPT
++            if _GPT is None:
++                # https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes
++                _GPT = kernel32.GetProcessTimes
++                _GPT.argtypes = (
++                    HANDLE,  # hProcess
++                    ctypes.POINTER(_FILETIME),  # lpCreationTime
++                    ctypes.POINTER(_FILETIME),  # lpExitTime
++                    ctypes.POINTER(_FILETIME),  # lpKernelTime
++                    ctypes.POINTER(_FILETIME),  # lpUserTime
++                )
++                _GPT.restype = BOOL
++
++            # The creation FILETIME is a 64-bit count of 100ns intervals since 1601-01-01 UTC.
++            # A process creation time is stable for the lifetime of the process and unique across
++            # recycled PIDs.
++            creation_time = _FILETIME()
++            if not _GPT(
++                phandle,
++                ctypes.byref(creation_time),
++                ctypes.byref(_FILETIME()),
++                ctypes.byref(_FILETIME()),
++                ctypes.byref(_FILETIME()),
++            ):
++                return None
++
++            return str((creation_time.dwHighDateTime << 32) | creation_time.dwLowDateTime)
++        finally:
++            kernel32.CloseHandle(phandle)
++
++    def terminate(pid):
++        # type: (int) -> None
++
++        import ctypes
++        from ctypes.wintypes import BOOL, DWORD, HANDLE, UINT
++
++        # Windows has no SIGTERM equivalent; TerminateProcess is the only way to ask another
++        # process to exit unconditionally and behaves like a SIGKILL for shutdown purposes.
++        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
++
++        # N.B.: Pin the prototypes on each invocation since the ctypes function objects are shared
++        # and their argtypes can be redefined by other callers.
++        open_process = kernel32.OpenProcess
++        open_process.argtypes = (DWORD, BOOL, DWORD)
++        open_process.restype = HANDLE
++        phandle = open_process(_PROCESS_TERMINATE, False, pid)
++        if not phandle:
++            raise ctypes.WinError()  # type: ignore[attr-defined]
++        try:
++            terminate_process = kernel32.TerminateProcess
++            terminate_process.argtypes = (HANDLE, UINT)
++            terminate_process.restype = BOOL
++            if not terminate_process(phandle, 1):
++                raise ctypes.WinError()  # type: ignore[attr-defined]
++        finally:
++            kernel32.CloseHandle(phandle)
++
+ else:
+ 
+     def is_alive(pid):
+@@ -259,3 +350,70 @@ else:
+         except OSError as e:
+             if e.errno != errno.ESRCH:  # No such process.
+                 raise
++
++    if sys.platform == "darwin":
++
++        def process_start_time(pid):
++            # type: (int) -> Optional[str]
++
++            # macOS does not expose /proc; `ps -o lstart=` renders the process start time and is
++            # stable for the lifetime of the process (and distinct for a recycled PID).
++            import subprocess
++
++            try:
++                process = subprocess.Popen(
++                    args=["ps", "-p", str(pid), "-o", "lstart="],
++                    stdout=subprocess.PIPE,
++                    stderr=subprocess.PIPE,
++                )
++                stdout, _ = process.communicate()
++                if process.returncode != 0:
++                    return None
++                start_time = stdout.decode("utf-8").strip()
++                return start_time or None
++            except OSError:
++                return None
++
++    elif os.path.isdir("/proc"):
++
++        def process_start_time(pid):
++            # type: (int) -> Optional[str]
++
++            # The 22nd field of /proc/<pid>/stat is the process start time in clock ticks since
++            # boot; see https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html. This value is
++            # stable for the lifetime of the process and distinct for a recycled PID.
++            try:
++                with open("/proc/{pid}/stat".format(pid=pid)) as fp:
++                    data = fp.read()
++            except (OSError, IOError):
++                return None
++
++            # The 2nd field (comm) is wrapped in parentheses and may itself contain spaces and
++            # parentheses, so split on the final closing parenthesis.
++            comm_end = data.rfind(")")
++            if comm_end == -1:
++                return None
++            fields = data[comm_end + 1:].split()
++            # After comm the fields resume at the 3rd field (state); starttime (22) is thus at
++            # index 19.
++            if len(fields) < 20:
++                return None
++            return fields[19]
++
++    else:
++
++        def process_start_time(pid):
++            # type: (int) -> Optional[str]
++            return None
++
++    def terminate(pid):
++        # type: (int) -> None
++
++        import errno
++        import signal
++
++        try:
++            os.kill(pid, signal.SIGTERM)  # type: ignore[attr-defined]
++        except OSError as e:
++            if e.errno != errno.ESRCH:  # No such process.
++                raise
+diff --git a/tests/test_http_server.py b/tests/test_http_server.py
+new file mode 100644
+index 00000000..13155e78
+--- /dev/null
++++ b/tests/test_http_server.py
+@@ -0,0 +1,490 @@
++# Copyright 2025 Pex project contributors.
++# Licensed under the Apache License, Version 2.0 (see LICENSE).
++
++from __future__ import absolute_import, print_function
++
++import json
++import os
++import socket
++import subprocess
++import sys
++import threading
++import time
++from uuid import uuid4
++
++import pytest
++
++from pex.docs.command import HtmlDocsConfig, serve_html_docs
++from pex.http import server as server_module
++from pex.http.server import (
++    LaunchError,
++    PidStatus,
++    Pidfile,
++    Server,
++    ServerInfo,
++)
++from pex.os import is_alive, process_start_time
++from pex.result import Error
++from pex.typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from typing import Iterator
++
++
++@pytest.fixture
++def doc_root(tmpdir):
++    # type: (Any) -> str
++    doc_root = tmpdir.join("html")
++    os.mkdir(doc_root)
++    with open(os.path.join(doc_root, "index.html"), "w") as fp:
++        fp.write("<h1>docs</h1>")
++    return doc_root
++
++
++@pytest.fixture
++def cache_dir(tmpdir):
++    # type: (Any) -> str
++    cache_dir = tmpdir.join("cache")
++    os.mkdir(cache_dir)
++    return cache_dir
++
++
++@pytest.fixture
++def server(cache_dir):
++    # type: (str) -> Iterator[Server]
++    test_server = Server(name="test docs HTTP server", cache_dir=cache_dir)
++    yield test_server
++    test_server.shutdown()
++
++
++def _write_pidfile(
++    cache_dir,  # type: str
++    server_info,  # type: ServerInfo
++):
++    # type: (...) -> None
++    with open(Pidfile.pidfile_path(cache_dir), "w") as fp:
++        json.dump(
++            dict(
++                url=server_info.url,
++                pid=server_info.pid,
++                token=server_info.token,
++                start_time=server_info.start_time,
++                log=server_info.log,
++            ),
++            fp,
++        )
++
++
++def _sleeping_process():
++    # type: () -> subprocess.Popen
++    return subprocess.Popen(
++        args=[sys.executable, "-c", "import time; time.sleep(120)"]
++    )
++
++
++def _wait_for(predicate, timeout=10.0, interval=0.05):
++    # type: (...) -> bool
++    deadline = time.time() + timeout
++    while time.time() < deadline:
++        if predicate():
++            return True
++        time.sleep(interval)
++    return predicate()
++
++
++def test_launch_publishes_generation_record(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    assert not result.already_running
++    assert result.server_info.token
++    assert is_alive(result.server_info.pid)
++
++    record = Pidfile.load(server.name, cache_dir)
++    assert record is not None
++    assert record.server_info == result.server_info
++    assert record.is_current()
++
++    # The start time captured at launch identifies the same operating system process.
++    actual_start_time = process_start_time(result.server_info.pid)
++    if actual_start_time is not None:
++        assert result.server_info.start_time == actual_start_time
++
++
++def test_launch_reuses_running_instance(server, doc_root):
++    # type: (Server, str) -> None
++    first = server.launch(doc_root, port=0, timeout=15.0)
++    second = server.launch(doc_root, port=0, timeout=15.0)
++    assert second.already_running
++    assert second.server_info == first.server_info
++
++
++def test_concurrent_launch_starts_one_instance(server, doc_root):
++    # type: (Server, str) -> None
++    results = []  # type: list
++    errors = []  # type: list
++    barrier = threading.Barrier(2)
++
++    def launch():
++        # type: () -> None
++        try:
++            barrier.wait()
++            results.append(server.launch(doc_root, port=0, timeout=15.0))
++        except Exception as e:
++            errors.append(e)
++
++    threads = [threading.Thread(target=launch) for _ in range(2)]
++    for thread in threads:
++        thread.start()
++    for thread in threads:
++        thread.join(30)
++        assert not thread.is_alive()
++
++    assert not errors
++    assert len(results) == 2
++    assert {result.server_info.pid for result in results} == {results[0].server_info.pid}
++    assert sorted(result.already_running for result in results) == [False, True]
++
++
++def test_concurrent_launch_from_separate_processes(doc_root, cache_dir):
++    # type: (str, str) -> None
++
++    # Simulates running `pex3 docs --no-open` in two terminals at once: exactly one competing
++    # caller creates the process, the other waits under the lock and reuses the instance.
++    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++    child_script = """
++import json, os, sys, time
++sys.path.insert(0, {repo_root!r})
++from pex.http.server import Server
++barrier = os.path.join(os.environ["CHILD_CACHE"], "barrier")
++if not os.path.isdir(barrier):
++    try:
++        os.makedirs(barrier)
++    except OSError:
++        pass
++with open(os.path.join(barrier, str(os.getpid())), "w"):
++    pass
++deadline = time.time() + 15
++while len(os.listdir(barrier)) < 2 and time.time() < deadline:
++    time.sleep(0.02)
++result = Server(name="child docs HTTP server", cache_dir=os.environ["CHILD_CACHE"]).launch(
++    os.environ["CHILD_DOC_ROOT"], port=0, timeout=15.0
++)
++sys.stdout.write(json.dumps({{"pid": result.server_info.pid,
++                             "url": result.server_info.url,
++                             "already_running": result.already_running}}))
++""".format(repo_root=repo_root)
++
++    env = dict(os.environ)
++    env["CHILD_CACHE"] = cache_dir
++    env["CHILD_DOC_ROOT"] = doc_root
++
++    children = [
++        subprocess.Popen(
++            args=[sys.executable, "-c", child_script],
++            env=env,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++        )
++        for _ in range(2)
++    ]
++    try:
++        outcomes = []
++        for child in children:
++            stdout, stderr = child.communicate(timeout=60)
++            assert child.returncode == 0, stderr.decode("utf-8")
++            outcomes.append(json.loads(stdout.decode("utf-8")))
++
++        assert outcomes[0]["pid"] == outcomes[1]["pid"]
++        assert outcomes[0]["url"] == outcomes[1]["url"]
++        assert sorted(outcome["already_running"] for outcome in outcomes) == [False, True]
++    finally:
++        Server(name="child docs HTTP server", cache_dir=cache_dir).shutdown()
++        for child in children:
++            if child.poll() is None:
++                child.kill()
++
++
++def test_running_reports_only_verified_instance(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    assert server.running() is None
++
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    running = server.running()
++    assert running is not None
++    assert running.server_info == result.server_info
++
++    server.shutdown()
++    assert server.running() is None
++
++    # A corrupt record is never reported as a running instance.
++    with open(Pidfile.pidfile_path(cache_dir), "w") as fp:
++        fp.write("{not valid json")
++    assert server.running() is None
++
++
++def test_shutdown_terminates_process_and_removes_record(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    pid = result.server_info.pid
++
++    shutdown_info = server.shutdown(timeout=15.0)
++    assert shutdown_info == result.server_info
++    assert _wait_for(lambda: not is_alive(pid))
++    assert not os.path.exists(Pidfile.pidfile_path(cache_dir))
++
++    # Idempotent: no instance -> None.
++    assert server.shutdown() is None
++
++
++def test_shutdown_waits_for_exit_before_removing_record(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    assert server.shutdown(timeout=15.0) is not None
++    assert not is_alive(result.server_info.pid)
++    assert not os.path.exists(Pidfile.pidfile_path(cache_dir))
++
++
++def test_corrupt_pidfile_is_reclaimed_on_launch(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    with open(Pidfile.pidfile_path(cache_dir), "w") as fp:
++        fp.write("garbage")
++
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    assert not result.already_running
++    assert Pidfile.load(server.name, cache_dir).is_current()
++
++
++def test_dead_pid_record_is_reclaimed(server, doc_root):
++    # type: (Server, str) -> None
++    dead = subprocess.Popen(args=[sys.executable, "-c", "import sys; sys.exit(0)"])
++    dead.wait()
++
++    _write_pidfile(
++        server.cache_dir,
++        ServerInfo(
++            url="http://localhost:1", pid=dead.pid, token=uuid4().hex, start_time="1"
++        ),
++    )
++    assert Pidfile.load(server.name, server.cache_dir).status() is PidStatus.DEAD
++
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    assert not result.already_running
++    assert result.server_info.pid != dead.pid
++
++
++def test_foreign_pid_is_reclaimed_but_never_signaled(server, doc_root):
++    # type: (Server, str) -> None
++    foreign = _sleeping_process()
++    try:
++        _wait_for(lambda: is_alive(foreign.pid))
++        _write_pidfile(
++            server.cache_dir,
++            ServerInfo(
++                url="http://localhost:1",
++                pid=foreign.pid,
++                token=uuid4().hex,
++                start_time="a-start-time-that-cannot-match",
++            ),
++        )
++        record = Pidfile.load(server.name, server.cache_dir)
++        assert record.status() is PidStatus.FOREIGN
++        assert server.running() is None
++
++        result = server.launch(doc_root, port=0, timeout=15.0)
++        assert result.server_info.pid != foreign.pid
++        assert is_alive(foreign.pid), "A process that recycled the recorded PID must not be killed"
++
++        # Shutdown must likewise leave the foreign process alone.
++        assert server.shutdown() is not None
++        assert is_alive(foreign.pid)
++    finally:
++        if foreign.poll() is None:
++            foreign.terminate()
++            foreign.wait()
++
++
++def test_unreachable_own_instance_is_restarted(server, doc_root):
++    # type: (Server, str) -> None
++    defunct = _sleeping_process()
++    try:
++        _wait_for(lambda: is_alive(defunct.pid))
++        start_time = process_start_time(defunct.pid)
++        if start_time is None:
++            pytest.skip("Cannot determine process start time on this platform.")
++        _write_pidfile(
++            server.cache_dir,
++            ServerInfo(
++                url="http://localhost:1",
++                pid=defunct.pid,
++                token=uuid4().hex,
++                start_time=start_time,
++            ),
++        )
++        record = Pidfile.load(server.name, server.cache_dir)
++        assert record.status() is PidStatus.UNREACHABLE
++
++        result = server.launch(doc_root, port=0, timeout=15.0)
++        assert not result.already_running
++        assert _wait_for(lambda: not is_alive(defunct.pid)), (
++            "The defunct recorded instance must be terminated before retrying"
++        )
++        assert server.running().server_info.pid == result.server_info.pid
++    finally:
++        if defunct.poll() is None:
++            defunct.terminate()
++            defunct.wait()
++
++
++def test_unverifiable_live_pid_is_never_signaled(server, doc_root):
++    # type: (Server, str) -> None
++    # A legacy-style record (no start time) for a live non-serving process cannot be proven ours.
++    unknown = _sleeping_process()
++    try:
++        _wait_for(lambda: is_alive(unknown.pid))
++        _write_pidfile(
++            server.cache_dir,
++            ServerInfo(
++                url="http://localhost:1", pid=unknown.pid, token=uuid4().hex, start_time=None
++            ),
++        )
++        record = Pidfile.load(server.name, server.cache_dir)
++        assert record.status() is PidStatus.UNKNOWN
++        assert server.running() is None
++
++        result = server.launch(doc_root, port=0, timeout=15.0)
++        assert result.server_info.pid != unknown.pid
++        assert is_alive(unknown.pid), "An unverifiable live process must not be terminated"
++        assert server.shutdown() is not None
++        assert is_alive(unknown.pid)
++    finally:
++        if unknown.poll() is None:
++            unknown.terminate()
++            unknown.wait()
++
++
++def test_generation_guarded_discard(cache_dir):
++    # type: (str) -> None
++    info = ServerInfo(url="http://localhost:1", pid=1, token=uuid4().hex, start_time="1")
++    _write_pidfile(cache_dir, info)
++
++    # An older generation must not be able to delete a newer generation's record.
++    assert os.path.exists(Pidfile.pidfile_path(cache_dir))
++    assert not Pidfile.discard("test", cache_dir, "some-older-generation")
++    assert os.path.exists(Pidfile.pidfile_path(cache_dir))
++
++    # Only the current generation can remove the record.
++    assert Pidfile.discard("test", cache_dir, info.token)
++    assert not os.path.exists(Pidfile.pidfile_path(cache_dir))
++
++
++def test_shutdown_old_generation_does_not_affect_new_generation(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    first = server.launch(doc_root, port=0, timeout=15.0)
++    old_record = Pidfile.load(server.name, cache_dir)
++
++    # Simulate a new generation publishing while an older shutdown call is in flight: the old
++    # caller's compare-and-delete must leave the new record untouched.
++    server.shutdown(timeout=15.0)
++    assert _wait_for(lambda: not is_alive(first.server_info.pid))
++
++    second = server.launch(doc_root, port=0, timeout=15.0)
++    assert second.server_info.pid != first.server_info.pid
++    assert not Pidfile.discard(server.name, cache_dir, old_record.server_info.token)
++
++    current = Pidfile.load(server.name, cache_dir)
++    assert current.server_info.token == second.server_info.token
++    assert is_alive(second.server_info.pid)
++
++
++def test_busy_port_failure_leaves_no_record_but_keeps_log_and_recovers(server, doc_root, cache_dir):
++    # type: (Server, str, str) -> None
++    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
++    listener.bind(("127.0.0.1", 0))
++    listener.listen(1)
++    busy_port = listener.getsockname()[1]
++
++    try:
++        with pytest.raises(LaunchError) as exc_info:
++            server.launch(doc_root, port=busy_port, timeout=5.0)
++        # No fake "running" record is left behind...
++        assert not os.path.exists(Pidfile.pidfile_path(cache_dir))
++        # ...but the generated log is retained and locatable via the error.
++        assert os.path.exists(exc_info.value.log)
++        assert exc_info.value.log in str(exc_info.value)
++    finally:
++        listener.close()
++
++    # Recovery: the next launch succeeds and leaves a verifiable record.
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    assert not result.already_running
++    assert server.running() is not None
++
++
++def test_publish_failure_aborts_server_and_leaves_no_record(
++    monkeypatch, server, doc_root, cache_dir
++):
++    # type: (Any, Server, str, str) -> None
++
++    published = []  # type: list
++
++    def failing_publish(cache_dir_arg, server_info):
++        # type: (str, ServerInfo) -> Pidfile
++        published.append(server_info)
++        raise OSError("simulated state write failure")
++
++    monkeypatch.setattr(server_module.Pidfile, "publish", staticmethod(failing_publish))
++
++    with pytest.raises(LaunchError):
++        server.launch(doc_root, port=0, timeout=15.0)
++
++    assert len(published) == 1
++    assert not os.path.exists(Pidfile.pidfile_path(cache_dir))
++    assert _wait_for(lambda: not is_alive(published[0].pid))
++
++    # A later launch recovers once state writes succeed again.
++    monkeypatch.undo()
++    result = server.launch(doc_root, port=0, timeout=15.0)
++    assert not result.already_running
++    assert server.running() is not None
++
++
++def test_serve_html_docs_without_embedded_docs(monkeypatch):
++    # type: (Any) -> None
++    from pex.docs import command as docs_command
++
++    monkeypatch.setattr(docs_command.docs, "root", lambda doc_type="html": None)
++    result = serve_html_docs(open_browser=False, config=HtmlDocsConfig())
++    assert isinstance(result, Error)
++    message = str(result)
++    assert "does not include embedded docs" in message
++    assert "https://docs.pex-tool.org" in message
++
++
++def test_serve_html_docs_falls_back_to_ephemeral_port(
++    monkeypatch, server, doc_root, cache_dir
++):
++    # type: (Any, Server, str, str) -> None
++    from pex.docs import command as docs_command
++
++    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    listener.bind(("127.0.0.1", 0))
++    listener.listen(1)
++    busy_port = listener.getsockname()[1]
++
++    try:
++        monkeypatch.setattr(docs_command.docs, "root", lambda doc_type="html": doc_root)
++        monkeypatch.setattr(docs_command, "server", server)
++        monkeypatch.setattr(docs_command, "STANDARD_PORT", busy_port)
++
++        result = serve_html_docs(open_browser=False, config=HtmlDocsConfig())
++        assert not isinstance(result, Error), result
++        actual_port = int(result.server_info.url.rsplit(":", 1)[1])
++        assert actual_port != busy_port
++        assert is_alive(result.server_info.pid)
++    finally:
++        listener.close()
++
++
++if TYPE_CHECKING:
++    from typing import Any

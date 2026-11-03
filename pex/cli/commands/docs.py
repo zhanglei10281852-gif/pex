@@ -44,10 +44,12 @@ class Docs(BuildTimeCommand):
         # type: () -> Result
 
         if self.options.server_info:
-            pidfile = server.pidfile()
-            if pidfile and pidfile.alive():
+            pidfile = server.running()
+            if pidfile:
                 return Ok(
-                    "{server} serving {info}".format(server=server.name, info=pidfile.server_info)
+                    "{server} serving {info}".format(
+                        server=server.name, info=pidfile.server_info
+                    )
                 )
             return Ok("No {server} is running.".format(server=server.name))
 
