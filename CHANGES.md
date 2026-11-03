@@ -1,5 +1,19 @@
 # Release Notes
 
+## Unreleased
+
+This release hardens `pex3 cache prune` when deleting entries of a shared PEX_ROOT. Pruning now
+prints a reviewable plan of the cached PEX parents and their shared dependencies before acting and
+then reports each entry as `succeeded`, `failed` or `skipped`. Shared dependencies (installed
+wheels, bootstraps, user code and Pip caches) are only removed after every cached PEX / venv that
+references them is confirmed deleted, re-verifying the current disk state after parents are pruned.
+A permission, file-in-use or transient I/O error deleting one entry no longer silently succeeds and
+no longer removes dependencies of the surviving entry; independent entries are still pruned and the
+exit code, entry list and reclaimed disk usage reflect the actual outcomes. `pip cache list` /
+`pip cache remove` failures are treated as independent failures and unparseable output is no longer
+counted as success. Re-running with the same `--older-than` cutoff converges against the current
+disk state.
+
 ## 2.106.2
 
 This release fixes `pex3 lock export --format pep-751` package marker calculation. As pointed out by

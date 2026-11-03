@@ -3,8 +3,10 @@
 
 from __future__ import absolute_import
 
+import io
 import os.path
 import shutil
+import subprocess as stdlib_subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -26,8 +28,10 @@ from pex.cache.dirs import (
     UserCodeDir,
     VenvDirs,
 )
+from pex.cli.commands.cache.command import FAILED, Cache
 from pex.cli.commands.cache.du import DiskUsage
 from pex.common import environment_as, safe_open
+from pex.jobs import Job
 from pex.os import WINDOWS
 from pex.pep_440 import Version
 from pex.pep_503 import ProjectName
@@ -610,3 +614,210 @@ def test_pip_prune(
     assert set(pip_venvs_by_version.values()) == set(
         VenvDirs.iter_all()
     ), "Expected the pip1 venv to be pruned along with pip1 itself."
+
+
+def unzip_dir_for(pex_path):
+    # type: (str) -> UnzipDir
+    pex_info = PexInfo.from_pex(pex_path)
+    assert pex_info.pex_hash is not None
+    return UnzipDir.create(pex_info.pex_hash)
+
+
+def make_undeletable(path):
+    # type: (str) -> "list"
+
+    # When available, the immutable flag defeats deletion even for root (CI containers run as
+    # root); otherwise a read-only directory defeats deletion for a non-root user.
+    chattr = shutil.which("chattr")
+    immutable = False
+    if chattr is not None:
+        with open(os.devnull, "wb") as devnull:
+            immutable = (
+                stdlib_subprocess.call(
+                    [chattr, "+i", path], stdout=devnull, stderr=stdlib_subprocess.STDOUT
+                )
+                == 0
+            )
+    try:
+        os.chmod(path, 0o555)
+    except OSError:
+        pass
+
+    def restore():
+        # type: () -> None
+        if immutable and chattr is not None:
+            with open(os.devnull, "wb") as devnull:
+                stdlib_subprocess.call(
+                    [chattr, "-i", path], stdout=devnull, stderr=stdlib_subprocess.STDOUT
+                )
+        try:
+            os.chmod(path, 0o755)
+        except OSError:
+            pass
+
+    return [restore]
+
+
+def test_prune_failed_parent_retains_deps_and_retries_converge(
+    pex_root,  # type: str
+    ansicolors_zipapp_pex,  # type: AnsicolorsPex
+    cowsay_pex,  # type: CowsayPex
+):
+    # type: (...) -> None
+
+    execute_ansicolors_pex(ansicolors_zipapp_pex)
+    set_last_access_one_day_ago(cowsay_pex.path)
+    set_last_access_one_day_ago(ansicolors_zipapp_pex.path)
+
+    ansicolors_unzip = unzip_dir_for(ansicolors_zipapp_pex.path)
+    cowsay_unzip = unzip_dir_for(cowsay_pex.path)
+    assert os.path.isdir(ansicolors_unzip.path)
+    assert os.path.isdir(cowsay_unzip.path)
+    ansicolors_deps = tuple(ansicolors_unzip.iter_deps())
+    assert ansicolors_deps, "Expected the old ansicolors PEX to reference cached dependencies."
+
+    restores = make_undeletable(ansicolors_unzip.path)
+    try:
+        failed_prune = run_pex3("cache", "prune", "--older-than", "1 hour")
+    finally:
+        for restore in restores:
+            restore()
+
+    assert failed_prune.return_code != 0, failed_prune.output
+    assert "failed:" in failed_prune.output
+    assert "skipped:" in failed_prune.output
+    assert "succeeded:" in failed_prune.output
+
+    if not os.path.exists(ansicolors_unzip.path):
+        pytest.skip("Cannot enforce an undeletable cache directory on this platform.")
+
+    # The failed parent survives together with every wheel, bootstrap and user code directory it
+    # depends on; these are reported skipped because of the surviving consumer.
+    assert os.path.exists(ansicolors_unzip.path), failed_prune.output
+    for dep in ansicolors_deps:
+        assert os.path.exists(dep.path), (
+            "Expected {dep} to be retained by the failed parent: {output}".format(
+                dep=dep.path, output=failed_prune.output
+            )
+        )
+
+    # The independent old parent is still deleted, along with the cowsay wheel only it used.
+    assert not os.path.exists(cowsay_unzip.path)
+    assert_installed_wheels(expected_pip_wheels_plus("ansicolors"))
+
+    # Re-running with the same cutoff re-converges against the current disk: the previously blocked
+    # parent and its dependencies are now removed, with no failures reported.
+    retry = run_pex3("cache", "prune", "--older-than", "1 hour")
+    retry.assert_success()
+    assert "failed:" not in retry.output, retry.output
+    assert not os.path.exists(ansicolors_unzip.path)
+    for dep in ansicolors_deps:
+        assert not os.path.exists(dep.path), dep.path
+    assert_installed_wheels(expected_pip_wheels())
+
+
+def test_prune_dry_run_is_reviewable_and_non_mutating(
+    pex_root,  # type: str
+    ansicolors_zipapp_pex,  # type: AnsicolorsPex
+    cowsay_pex,  # type: CowsayPex
+):
+    # type: (...) -> None
+
+    execute_ansicolors_pex(ansicolors_zipapp_pex)
+    set_last_access_one_day_ago(cowsay_pex.path)
+
+    ansicolors_unzip = unzip_dir_for(ansicolors_zipapp_pex.path)
+    cowsay_unzip = unzip_dir_for(cowsay_pex.path)
+
+    pre_prune_du = du(pex_root)
+    result = run_pex3("cache", "prune", "--older-than", "1 hour", "--dry-run")
+    result.assert_success()
+
+    assert pre_prune_du == du(pex_root), "A dry run must not change cache state."
+    assert os.path.isdir(ansicolors_unzip.path)
+    assert os.path.isdir(cowsay_unzip.path)
+    assert "prune plan" in result.output
+    assert "Dry-run" in result.output
+    # The shared bootstrap / ansicolors wheel are blocked by the recent ansicolors consumer and the
+    # blocking reason is shown in the plan.
+    assert "still used by" in result.output
+
+
+class _FakePipVersion(str):
+    @property
+    def value(self):
+        # type: () -> str
+        return str(self)
+
+
+def _stdout_job(text):
+    # type: (str) -> Job
+    process = stdlib_subprocess.Popen(
+        args=[
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write({text!r})".format(text=text),
+        ],
+        stdout=stdlib_subprocess.PIPE,
+        stderr=stdlib_subprocess.PIPE,
+    )
+    return Job(command=tuple(process.args), process=process)
+
+
+class _FakePip(object):
+    def __init__(
+        self,
+        version,  # type: str
+        list_job=None,  # type: Optional[Job]
+        remove_jobs=None,  # type: Optional[Dict[str, Job]]
+        raise_list=False,  # type: bool
+    ):
+        self.version = _FakePipVersion(version)
+        self._list_job = list_job
+        self._remove_jobs = remove_jobs or {}
+        self._raise_list = raise_list
+
+    def spawn_cache_list(self):
+        # type: () -> Job
+        if self._raise_list:
+            raise OSError("simulated spawn failure")
+        assert self._list_job is not None
+        return self._list_job
+
+    def spawn_cache_remove(self, wheel_name_glob):
+        # type: (str) -> Job
+        return self._remove_jobs[wheel_name_glob]
+
+
+def test_pip_cache_failures_are_independent_and_not_silent():
+    # type: () -> None
+
+    removable_wheels = {(ProjectName("foo"), Version("1.0"))}
+    listed_wheel = "/some/pip-cache/wheels/foo-1.0-py3-none-any.whl\n"
+
+    good_pip = _FakePip(
+        "9.1",
+        list_job=_stdout_job(listed_wheel),
+        remove_jobs={"foo-1.0*": _stdout_job("Files removed: 2\n")},
+    )
+    bad_output_pip = _FakePip(
+        "9.2",
+        list_job=_stdout_job(listed_wheel),
+        remove_jobs={"foo-1.0*": _stdout_job("something went wrong\n")},
+    )
+    broken_list_pip = _FakePip("9.3", raise_list=True)
+
+    out = io.StringIO()
+    # A failure from one Pip (list spawn error, unparseable remove output) must not roll back the
+    # successful removals from another Pip nor abort processing.
+    results = Cache._pip_cache_results(
+        None,  # type: ignore[arg-type]
+        out,
+        {"9.1": good_pip, "9.2": bad_output_pip, "9.3": broken_list_pip},
+        removable_wheels,
+    )
+    statuses = {(result.noun, result.status) for result in results}
+    assert ("Pip cache list", FAILED) in statuses
+    assert ("Pip cache remove", FAILED) in statuses, statuses
+    assert "removed 2" in out.getvalue()
+

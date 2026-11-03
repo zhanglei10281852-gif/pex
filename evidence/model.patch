@@ -1,0 +1,3075 @@
+diff --git a/CHANGES.md b/CHANGES.md
+index 21a773aa..70bc1ed5 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -1,5 +1,19 @@
+ # Release Notes
+ 
++## Unreleased
++
++This release hardens `pex3 cache prune` when deleting entries of a shared PEX_ROOT. Pruning now
++prints a reviewable plan of the cached PEX parents and their shared dependencies before acting and
++then reports each entry as `succeeded`, `failed` or `skipped`. Shared dependencies (installed
++wheels, bootstraps, user code and Pip caches) are only removed after every cached PEX / venv that
++references them is confirmed deleted, re-verifying the current disk state after parents are pruned.
++A permission, file-in-use or transient I/O error deleting one entry no longer silently succeeds and
++no longer removes dependencies of the surviving entry; independent entries are still pruned and the
++exit code, entry list and reclaimed disk usage reflect the actual outcomes. `pip cache list` /
++`pip cache remove` failures are treated as independent failures and unparseable output is no longer
++counted as success. Re-running with the same `--older-than` cutoff converges against the current
++disk state.
++
+ ## 2.106.2
+ 
+ This release fixes `pex3 lock export --format pep-751` package marker calculation. As pointed out by
+diff --git a/evidence/rubric-comparison-report.txt b/evidence/rubric-comparison-report.txt
+new file mode 100644
+index 00000000..66337489
+--- /dev/null
++++ b/evidence/rubric-comparison-report.txt
+@@ -0,0 +1,9 @@
++项目：pex-tool-pex-dc6b01f6-fb01-464f-bb25-ab08e6ba35b6｜Session：6ae96652e498b5216ff88e49｜结论：部分完成
++Rubric ID：1｜状态：通过｜期望行为：依赖仅在所有候选使用者实际删除成功后删除。｜实际观察：扫描建立依赖到候选与保留父项的引用图；父项删除后重新扫描当前磁盘，存在任何 surviving consumer 时生成 skipped 而不删除依赖。｜直接证据：pex/cache/prunable.py:117-248；pex/cli/commands/cache/command.py:1096-1155。
++Rubric ID：2｜状态：通过｜期望行为：单个父目录失败不阻断独立项，并保留该父项依赖。｜实际观察：_prune_paths 将每个删除错误转为 failed，iter_map_parallel 继续其他条目；存活父项通过当前磁盘与扫描时回退图保留依赖。｜直接证据：pex/cli/commands/cache/command.py:183-229、601-631、1096-1155。
++Rubric ID：3｜状态：通过｜期望行为：Pip cache list/remove 失败明确记录并影响退出结果，不回滚文件删除且不静默为零。｜实际观察：并行作业异常和不可解析输出均生成 FAILED PrunedEntry，最终 failed 计数返回 Error；独立测试通过。｜直接证据：pex/cli/commands/cache/command.py:700-832、1225-1257；pip_cache_failures 测试 1 passed。
++Rubric ID：4｜状态：未通过｜期望行为：输出与回收量准确汇总 succeeded、failed、skipped，重试按当前状态处理。｜实际观察：一个逻辑条目含 good 与 bad 两个路径时，good 成功删除 100 字节、bad 失败，PrunedEntry 总状态为 failed；最终回收量只聚合总状态为 succeeded 的条目，因此报告 0 字节。｜直接证据：visibility_repro.py 输出 successful_path_bytes=100、final_reclaimed_bytes=0、good_removed=True。｜原因：最终 DiskUsage.aggregate 过滤 result.status == SUCCEEDED，丢弃部分失败条目内部已成功路径的 disk_usage。｜影响：部分成功执行的实际回收空间被少报，输出统计与磁盘变化不一致。｜证据位置：pex/cli/commands/cache/command.py:153-163、183-229、1225-1243；F:/swe/work/visibility_repro.py
++Rubric ID：5｜状态：通过｜期望行为：相同 cutoff 重试删除已解除阻塞的依赖且不误删保留父项内容。｜实际观察：不存在路径按 succeeded 零用量处理；每次运行重新 Prunable.scan 并在父项阶段后重建 retained consumer 映射。｜直接证据：pex/cli/commands/cache/command.py:191-199、868-931、1096-1155。
++Rubric ID：6｜状态：通过｜期望行为：dry-run 同序且不修改状态，成功、无候选、copies/symlinks 和删除锁兼容。｜实际观察：dry-run 使用同一 plan 展示六阶段后直接返回且未调用删除；真实执行仍在扫描前获取既有删除锁，wheel backing paths 同时覆盖 copy、symlink 与附加缓存目录。｜直接证据：pex/cli/commands/cache/command.py:868-885、931-1083；_dependency_backing_paths:240-268。
++
++关键原始证据摘要：Pip 独立失败测试 1 passed；依赖图和重试路径完成代码审计；部分删除复现实际删除 100 字节而最终回收量为 0。
+diff --git a/evidence/screenshots/01-rubric-comparison.png b/evidence/screenshots/01-rubric-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..a66d00eca4d019827a2328cf41ee36925eab3e58
+GIT binary patch
+literal 62437
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/evidence/verify-rubric.yaml b/evidence/verify-rubric.yaml
+new file mode 100644
+index 00000000..0e545f72
+--- /dev/null
++++ b/evidence/verify-rubric.yaml
+@@ -0,0 +1,19 @@
++rubrics:
++  - id: 1
++    type: f2p
++    text: "裁剪计划基于 PEX、venv、解释器和共享依赖关系，只有所有候选使用者实际删除成功后才删除对应依赖。"
++  - id: 2
++    type: f2p
++    text: "单个父目录删除失败时，互不依赖项仍可继续处理，而该父项仍需要的 wheel、bootstrap、用户代码和相关缓存被标为 skipped 并保留可用。"
++  - id: 3
++    type: f2p
++    text: "Pip cache list 或 remove 失败被明确记录并影响退出结果，不会回滚已完成的文件删除，也不会被静默当作零删除成功。"
++  - id: 4
++    type: f2p
++    text: "命令输出和回收量分别准确汇总 succeeded、failed 与 skipped 条目；不存在或已由前次删除的路径在重试中按当前状态处理。"
++  - id: 5
++    type: f2p
++    text: "相同 cutoff 的后续重试可删除先前阻塞但现在无引用的依赖，并且不会误删仍被保留父项使用的内容。"
++  - id: 6
++    type: p2p
++    text: "dry-run 与真实执行采用相同选择和依赖顺序但不修改状态；全部成功、无候选、copies 与 symlinks 差异及删除锁等待保持兼容。"
+diff --git a/pex/cache/prunable.py b/pex/cache/prunable.py
+index ad63195b..f97597b1 100644
+--- a/pex/cache/prunable.py
++++ b/pex/cache/prunable.py
+@@ -4,160 +4,284 @@
+ from __future__ import absolute_import
+ 
+ import os.path
+-from collections import OrderedDict
++from collections import OrderedDict, defaultdict
+ from datetime import datetime
+ 
+ from pex.cache import access
+ from pex.cache.dirs import (
+     BootstrapDir,
+     InstalledWheelDir,
+-    InterpreterDir,
+     UnzipDir,
+     UserCodeDir,
+     VenvDirs,
+ )
+-from pex.orderedset import OrderedSet
+-from pex.pip.installation import iter_all as iter_all_pips
+-from pex.pip.tool import Pip
+-from pex.pip.version import PipVersionValue
+ from pex.typing import TYPE_CHECKING
+ 
+ if TYPE_CHECKING:
+-    # MyPy run for 2.7 does not recognize the Collection type
++    # MyPy run for 2.7 does not recognize the DefaultDict type
+     from typing import (  # type: ignore[attr-defined]
+-        Collection,
+-        Container,
++        DefaultDict,
+         Dict,
++        FrozenSet,
++        Iterable,
+         Iterator,
+         List,
+-        Mapping,
++        Optional,
+         Set,
+         Tuple,
+         Union,
+     )
+ 
+     import attr  # vendor:skip
++
++    # A cached PEX zipapp (`UnzipDir`) or venv (`VenvDirs`); these are the "parents" that consume
++    # shared dependencies.
++    PexDir = Union[UnzipDir, VenvDirs]
++
++    # A shared dependency consumed by cached PEX parents.
++    Dependency = Union[BootstrapDir, UserCodeDir, InstalledWheelDir]
+ else:
+     from pex.third_party import attr
+ 
+ 
++# The intermediary unzipped instance of a --venv PEX is pruned regardless of the cutoff since it
++# is only needed to perform the initial venv install.
++INTERMEDIARY_UNZIP_REASON = "intermediary unzip of an installed --venv PEX"
++
++
+ @attr.s(frozen=True)
+-class Pips(object):
+-    @classmethod
+-    def scan(cls, pex_dirs_by_hash):
+-        # type: (Mapping[str, Tuple[Union[UnzipDir, VenvDirs], bool]]) -> Pips
+-
+-        # True to prune the Pip version completely, False to just prune the Pip PEX.
+-        pips_to_prune = OrderedDict()  # type: OrderedDict[Pip, bool]
+-
+-        # N.B.: We just need 1 Pip per version (really per paired cache). Whether a Pip has
+-        # extra requirements installed does not affect cache management.
+-        pip_caches_to_prune = OrderedDict()  # type: OrderedDict[PipVersionValue, Pip]
+-        for pip in iter_all_pips(record_access=False):
+-            pex_dir, prunable = pex_dirs_by_hash[pip.pex_hash]
+-            if prunable:
+-                pips_to_prune[pip] = False
+-            else:
+-                pip_caches_to_prune[pip.version] = pip
+-        for pip in pips_to_prune:
+-            if pip.version not in pip_caches_to_prune:
+-                pips_to_prune[pip] = True
+-
+-        pip_paths_to_prune = tuple(
+-            (pip.pex_dir.base_dir if prune_version else pip.pex_dir.path)
+-            for pip, prune_version in pips_to_prune.items()
+-        )
+-        return cls(paths=pip_paths_to_prune, pips=tuple(pip_caches_to_prune.values()))
++class PexParent(object):
++    """A cached PEX zipapp or venv that is a candidate for pruning ("a parent")."""
++
++    pex_dir = attr.ib()  # type: PexDir
++    last_access = attr.ib()  # type: float
++    reason = attr.ib()  # type: str
++
++
++@attr.s(frozen=True)
++class DependencyUse(object):
++    """A shared dependency along with the cached PEX consumers known to reference it.
++
++    `records` carries every record discovered for the dependency's real path. These only differ
++    for installed wheels referenced via more than one install-hash symlink; all such symlink
++    backing dirs must be removed together with the shared wheel chroot.
++    """
+ 
+-    paths = attr.ib()  # type: Tuple[str, ...]
+-    pips = attr.ib()  # type: Tuple[Pip, ...]
++    dep = attr.ib()  # type: Dependency
++    records = attr.ib()  # type: Tuple[Dependency, ...]
++    candidate_consumers = attr.ib()  # type: Tuple[str, ...]
++    retained_consumers = attr.ib()  # type: Tuple[str, ...]
++
++    @property
++    def blocked(self):
++        # type: () -> bool
++        """`True` if at least one consumer is retained (not a prune candidate)."""
++        return bool(self.retained_consumers)
++
++
++def _dep_record_key(dep):
++    # type: (Dependency) -> Tuple[str, Optional[str]]
++    return dep.path, getattr(dep, "symlink_dir", None)
++
++
++class _DepRecord(object):
++    """Mutable accumulation point for a single dependency real path during a scan."""
++
++    def __init__(self, dep):
++        # type: (Dependency) -> None
++        self.dep = dep
++        self._records = OrderedDict()  # type: OrderedDict[Tuple[str, Optional[str]], Dependency]
++        self._records[_dep_record_key(dep)] = dep
++        self.candidate_consumers = []  # type: List[str]
++        self.retained_consumers = []  # type: List[str]
++
++    def add_record(self, dep):
++        # type: (Dependency) -> None
++        self._records.setdefault(_dep_record_key(dep), dep)
++
++    @property
++    def records(self):
++        # type: () -> Tuple[Dependency, ...]
++        return tuple(self._records.values())
++
++
++def _format_cutoff_reason(
++    last_access,  # type: float
++    cutoff,  # type: datetime
++):
++    # type: (...) -> str
++    return "last accessed {last_access} prior to the cutoff of {cutoff}".format(
++        last_access=datetime.fromtimestamp(last_access).isoformat(),
++        cutoff=cutoff.isoformat(),
++    )
+ 
+ 
+ @attr.s(frozen=True)
+ class Prunable(object):
++    """A reviewable prune plan derived from a point-in-time scan of the Pex cache.
++
++    The plan only describes what *appears* prunable at scan time. Dependencies listed in
++    `dependency_uses` are only removable once all of their candidate consumers have actually been
++    deleted, which must be re-verified against the current disk state after parents are removed.
++    """
++
++    cutoff = attr.ib()  # type: datetime
++    parents = attr.ib()  # type: Tuple[PexParent, ...]
++    retained_pex_dirs = attr.ib()  # type: Tuple[PexDir, ...]
++    dependency_uses = attr.ib()  # type: Tuple[DependencyUse, ...]
++    blocked_dependencies = attr.ib()  # type: Tuple[DependencyUse, ...]
++    orphan_dependencies = attr.ib()  # type: Tuple[Dependency, ...]
++    venv_dir_paths = attr.ib()  # type: FrozenSet[str]
++
+     @classmethod
+     def scan(cls, cutoff):
+         # type: (datetime) -> Prunable
+ 
+-        venv_dir_paths = []  # type: List[str]
+-        prunable_pex_dirs = set()  # type: Set[Union[UnzipDir, VenvDirs]]
++        # First pass: classify all cached PEX parents against the cutoff.
++        all_pex_dirs = []  # type: List[Tuple[PexDir, float]]
++        venv_pex_hashes = set()  # type: Set[str]
++        venv_dir_paths = set()  # type: Set[str]
+         for pex_dir, last_access in access.iter_all_cached_pex_dirs():
++            all_pex_dirs.append((pex_dir, last_access))
+             if isinstance(pex_dir, VenvDirs):
+-                venv_dir_paths.append(pex_dir.path)
+-
+-                # Before a --venv installs, it 1st unzips itself. The unzipped instance of the
+-                # PEX is not needed past the initial install; so we remove it regardless of cutoff.
+-                unzip_dir = UnzipDir.create(pex_dir.pex_hash)
+-                if os.path.exists(unzip_dir.path):
+-                    prunable_pex_dirs.add(unzip_dir)
+-
+-            prunable = datetime.fromtimestamp(last_access) < cutoff
+-            if prunable:
+-                prunable_pex_dirs.add(pex_dir)
+-
+-        pex_dirs = []  # type: List[Union[UnzipDir, VenvDirs]]
+-        pex_deps = (
+-            OrderedSet()
+-        )  # type: OrderedSet[Union[BootstrapDir, UserCodeDir, InstalledWheelDir]]
+-        unprunable_deps = []  # type: List[Union[BootstrapDir, UserCodeDir, InstalledWheelDir]]
+-        pex_dirs_by_hash = {}  # type: Dict[str, Tuple[Union[UnzipDir, VenvDirs], bool]]
+-        for pex_dir, last_access in access.iter_all_cached_pex_dirs():
+-            prunable = pex_dir in prunable_pex_dirs
+-            if prunable:
+-                pex_dirs.append(pex_dir)
+-                pex_deps.update(pex_dir.iter_deps())
++                venv_pex_hashes.add(pex_dir.pex_hash)
++                venv_dir_paths.add(pex_dir.path)
++
++        parents = []  # type: List[PexParent]
++        retained_pex_dirs = []  # type: List[PexDir]
++        for pex_dir, last_access in all_pex_dirs:
++            reasons = []  # type: List[str]
++            if isinstance(pex_dir, UnzipDir) and pex_dir.pex_hash in venv_pex_hashes:
++                reasons.append(INTERMEDIARY_UNZIP_REASON)
++            if datetime.fromtimestamp(last_access) < cutoff:
++                reasons.append(_format_cutoff_reason(last_access, cutoff))
++            if reasons:
++                parents.append(
++                    PexParent(
++                        pex_dir=pex_dir,
++                        last_access=last_access,
++                        reason="; ".join(reasons),
++                    )
++                )
+             else:
+-                unprunable_deps.extend(pex_dir.iter_deps())
+-            pex_dirs_by_hash[pex_dir.pex_hash] = pex_dir, prunable
+-        pips = Pips.scan(pex_dirs_by_hash)
++                retained_pex_dirs.append(pex_dir)
++
++        # Second pass: build the dependency -> consumer(s) reference graph. Dependencies are keyed
++        # by their real on-disk path so that installed wheel symlinks to a shared chroot collapse
++        # to a single dependency record.
++        records_by_path = OrderedDict()  # type: OrderedDict[str, _DepRecord]
++
++        def register(
++            pex_dir,  # type: PexDir
++            candidate,  # type: bool
++        ):
++            # type: (...) -> None
++            for dep in pex_dir.iter_deps():
++                record = records_by_path.get(dep.path)
++                if record is None:
++                    record = _DepRecord(dep)
++                    records_by_path[dep.path] = record
++                else:
++                    record.add_record(dep)
++                consumers = (
++                    record.candidate_consumers if candidate else record.retained_consumers
++                )
++                if pex_dir.path not in consumers:
++                    consumers.append(pex_dir.path)
++
++        for pex_parent in parents:
++            register(pex_parent.pex_dir, True)
++        for pex_dir in retained_pex_dirs:
++            register(pex_dir, False)
++
++        dependency_uses = []  # type: List[DependencyUse]
++        blocked_dependencies = []  # type: List[DependencyUse]
++        referenced_dep_paths = set(records_by_path.keys())  # type: Set[str]
++        for record in records_by_path.values():
++            dependency_use = DependencyUse(
++                dep=record.dep,
++                records=record.records,
++                candidate_consumers=tuple(record.candidate_consumers),
++                retained_consumers=tuple(record.retained_consumers),
++            )
++            if dependency_use.blocked:
++                blocked_dependencies.append(dependency_use)
++            else:
++                dependency_uses.append(dependency_use)
++
++        # Orphans: dependencies on disk that no cached PEX parent references at all. More than one
++        # orphan record may share a real path (an installed wheel chroot with multiple dangling
++        # install-hash symlinks); the caller groups records by path for deletion.
++        orphan_dependencies = []  # type: List[Dependency]
++        for dep in _iter_all_deps():
++            if dep.path not in referenced_dep_paths:
++                orphan_dependencies.append(dep)
+ 
+         return cls(
+-            pex_dirs=tuple(pex_dirs),
+-            pex_deps=pex_deps,
++            cutoff=cutoff,
++            parents=tuple(parents),
++            retained_pex_dirs=tuple(retained_pex_dirs),
++            dependency_uses=tuple(dependency_uses),
++            blocked_dependencies=tuple(blocked_dependencies),
++            orphan_dependencies=tuple(orphan_dependencies),
+             venv_dir_paths=frozenset(venv_dir_paths),
+-            unprunable_deps=frozenset(unprunable_deps),
+-            pips=pips,
+         )
+ 
+-    pex_dirs = attr.ib()  # type: Tuple[Union[UnzipDir, VenvDirs], ...]
+-    _pex_deps = attr.ib()  # type: Collection[Union[BootstrapDir, UserCodeDir, InstalledWheelDir]]
+-    _venv_dir_paths = attr.ib()  # type: Container[str]
+-    _unprunable_deps = (
+-        attr.ib()
+-    )  # type: Container[Union[BootstrapDir, UserCodeDir, InstalledWheelDir]]
+-    pips = attr.ib()  # type: Pips
+-
+-    def iter_pex_unused_deps(self):
+-        # type: () -> Iterator[Union[BootstrapDir, UserCodeDir, InstalledWheelDir]]
+-        for dep in self._pex_deps:
+-            if dep not in self._unprunable_deps:
+-                yield dep
+-
+-    def iter_other_unused_deps(self):
+-        # type: () -> Iterator[Union[BootstrapDir, UserCodeDir, InstalledWheelDir]]
+-
+-        for bootstrap_dir in BootstrapDir.iter_all():
+-            if bootstrap_dir not in self._pex_deps and bootstrap_dir not in self._unprunable_deps:
+-                yield bootstrap_dir
+-
+-        for user_code_dir in UserCodeDir.iter_all():
+-            if user_code_dir not in self._pex_deps and user_code_dir not in self._unprunable_deps:
+-                yield user_code_dir
+-
+-        for installed_wheel_dir in InstalledWheelDir.iter_all():
+-            if (installed_wheel_dir not in self._pex_deps) and (
+-                installed_wheel_dir not in self._unprunable_deps
+-            ):
+-                yield installed_wheel_dir
+-
+-    def iter_interpreters(self):
+-        # type: () -> Iterator[InterpreterDir]
+-        for interpreter_dir in InterpreterDir.iter_all():
+-            if not interpreter_dir.valid():
+-                yield interpreter_dir
+-            else:
+-                venv_dir = interpreter_dir.venv_dir()
+-                if not venv_dir:
+-                    continue
+-                if venv_dir.path in self._venv_dir_paths:
+-                    yield interpreter_dir
++    @staticmethod
++    def iter_current_pex_dirs():
++        # type: () -> Iterator[PexDir]
++        """Iterates the cached PEX parents present on disk right now (no cutoff)."""
++        for pex_dir in UnzipDir.iter_all():
++            yield pex_dir
++        for pex_dir in VenvDirs.iter_all():
++            yield pex_dir
++
++    @classmethod
++    def iter_retained_dep_consumers(cls, candidate_parents=()):
++        # type: (Iterable[PexParent]) -> Dict[str, List[str]]
++        """Re-converges against the current disk after parent deletion was attempted.
++
++        Returns a mapping of dependency path to the paths of cached PEX consumers still present on
++        disk. Candidate parents that survived a failed deletion are accounted for directly (even if
++        they are no longer discoverable via a removed venv short-hash symlink), along with any PEX
++        dir currently found on disk. A dependency is only safe to remove when it has no entry in
++        this mapping.
++        """
++        consumers = defaultdict(list)  # type: DefaultDict[str, List[str]]
++
++        accounted_parent_paths = set()  # type: Set[str]
++
++        def add_consumer(pex_dir):
++            # type: (PexDir) -> None
++            try:
++                deps = list(pex_dir.iter_deps())
++            except (OSError, ValueError, KeyError):
++                # The parent survived deletion but its metadata is corrupt or partially
++                # removed; the caller conservatively retains all of its scan-time dependencies.
++                return
++            for dep in deps:
++                if pex_dir.path not in consumers[dep.path]:
++                    consumers[dep.path].append(pex_dir.path)
++
++        for parent in candidate_parents:
++            accounted_parent_paths.add(parent.pex_dir.path)
++            if os.path.lexists(parent.pex_dir.path):
++                # The parent survived deletion; everything it references remains in use.
++                add_consumer(parent.pex_dir)
++
++        for pex_dir in cls.iter_current_pex_dirs():
++            if pex_dir.path in accounted_parent_paths:
++                continue
++            add_consumer(pex_dir)
++
++        return dict(consumers)
++
++
++def _iter_all_deps():
++    # type: () -> Iterator[Dependency]
++    for bootstrap_dir in BootstrapDir.iter_all():
++        yield bootstrap_dir
++    for user_code_dir in UserCodeDir.iter_all():
++        yield user_code_dir
++    for installed_wheel_dir in InstalledWheelDir.iter_all():
++        yield installed_wheel_dir
+diff --git a/pex/cli/commands/cache/command.py b/pex/cli/commands/cache/command.py
+index 4ef04e82..7199593c 100644
+--- a/pex/cli/commands/cache/command.py
++++ b/pex/cli/commands/cache/command.py
+@@ -3,12 +3,11 @@
+ 
+ from __future__ import absolute_import, print_function
+ 
+-import functools
+ import itertools
+ import os
+ import re
+ from argparse import Action, ArgumentError, _ActionsContainer
+-from collections import Counter, defaultdict
++from collections import Counter, OrderedDict, defaultdict
+ from datetime import datetime, timedelta
+ 
+ from pex.cache.dirs import (
+@@ -19,22 +18,30 @@ from pex.cache.dirs import (
+     CacheDir,
+     DownloadDir,
+     InstalledWheelDir,
++    InterpreterDir,
+     PackedWheelDir,
+     VenvDirs,
+ )
+-from pex.cache.prunable import Prunable
++from pex.cache.prunable import PexParent, Prunable
+ from pex.cli.command import BuildTimeCommand
+ from pex.cli.commands.cache.bytes import ByteAmount, ByteUnits
+ from pex.cli.commands.cache.du import DiskUsage
+ from pex.cli.commands.cache_aware import CacheAwareMixin
+ from pex.commands.command import OutputMixin
+-from pex.common import pluralize, safe_rmtree
+-from pex.dist_metadata import ProjectNameAndVersion
++from pex.common import pluralize, rmtree, safe_rmtree
++from pex.dist_metadata import ProjectNameAndVersion, UnrecognizedDistributionFormat
+ from pex.exceptions import reportable_unexpected_error_msg
+-from pex.jobs import SpawnedJob, execute_parallel, iter_map_parallel, map_parallel
++from pex.jobs import (
++    Retain,
++    SpawnedJob,
++    execute_parallel,
++    iter_map_parallel,
++    map_parallel,
++)
+ from pex.orderedset import OrderedSet
+ from pex.pep_440 import Version
+ from pex.pep_503 import ProjectName
++from pex.pip.installation import iter_all as iter_all_pips
+ from pex.pip.tool import Pip
+ from pex.result import Error, Ok, Result
+ from pex.typing import TYPE_CHECKING
+@@ -42,7 +49,17 @@ from pex.variables import ENV
+ 
+ if TYPE_CHECKING:
+     import typing
+-    from typing import DefaultDict, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
++    from typing import (
++        DefaultDict,
++        Iterable,
++        Iterator,
++        List,
++        Mapping,
++        Optional,
++        Set,
++        Tuple,
++        Union,
++    )
+ 
+     import attr  # vendor:skip
+ else:
+@@ -90,57 +107,176 @@ class Cutoff(object):
+     cutoff = attr.ib()  # type: datetime
+ 
+ 
+-def _prune_cache_dir(
+-    dry_run,  # type: bool
+-    additional_cache_dirs_by_project_name_and_version,  # type: Mapping[Tuple[ProjectName, Version], Iterable[AtomicCacheDir]]
+-    cache_dir,  # type: AtomicCacheDir
+-):
+-    # type: (...) -> DiskUsage
+-    paths_to_prune = []  # type: List[str]
+-
+-    def prune_if_exists(path):
+-        # type: (Optional[str]) -> None
+-        if path and os.path.exists(path):
+-            paths_to_prune.append(path)
+-
+-    if isinstance(cache_dir, InstalledWheelDir):
+-        paths_to_prune.append(os.path.dirname(cache_dir.path))
+-        paths_to_prune.extend(PackedWheelDir.iter(cache_dir.install_hash))
+-        for additional_dir in additional_cache_dirs_by_project_name_and_version.get(
+-            (cache_dir.project_name, cache_dir.version), ()
+-        ):
+-            prune_if_exists(additional_dir)
+-    elif isinstance(cache_dir, BootstrapDir):
+-        paths_to_prune.append(cache_dir.path)
+-        paths_to_prune.extend(BootstrapZipDir.iter(cache_dir.bootstrap_hash))
+-    else:
+-        paths_to_prune.append(cache_dir.path)
+-
+-    disk_usages = [DiskUsage.collect(path) for path in paths_to_prune]
+-    if not dry_run:
+-        for path in paths_to_prune:
+-            safe_rmtree(path)
+-        if isinstance(cache_dir, InstalledWheelDir) and cache_dir.symlink_dir:
+-            safe_rmtree(cache_dir.symlink_dir)
+-        elif isinstance(cache_dir, VenvDirs):
+-            safe_rmtree(cache_dir.short_dir)
+-
+-    return (
+-        disk_usages[0]
+-        if len(disk_usages) == 1
+-        else DiskUsage.aggregate(cache_dir.path, disk_usages)
++# Per-entry prune statuses. A dependency whose candidate consumers failed to be deleted is
++# `skipped`; a path whose deletion was attempted but which survives is `failed`; only paths
++# confirmed gone are `succeeded`.
++SUCCEEDED = "succeeded"
++FAILED = "failed"
++SKIPPED = "skipped"
++
++
++@attr.s(frozen=True)
++class PrunedPath(object):
++    path = attr.ib()  # type: str
++    status = attr.ib()  # type: str
++    disk_usage = attr.ib()  # type: DiskUsage
++    error = attr.ib(default=None)  # type: Optional[str]
++
++
++@attr.s(frozen=True)
++class PrunedEntry(object):
++    noun = attr.ib()  # type: str
++    path = attr.ib()  # type: str
++    paths = attr.ib()  # type: Tuple[PrunedPath, ...]
++    status = attr.ib()  # type: str
++    detail = attr.ib(default=None)  # type: Optional[str]
++
++    @staticmethod
++    def skipped(
++        noun,  # type: str
++        path,  # type: str
++        reason,  # type: str
++    ):
++        # type: (...) -> PrunedEntry
++        return PrunedEntry(noun=noun, path=path, paths=(), status=SKIPPED, detail=reason)
++
++    @staticmethod
++    def failed_external(
++        noun,  # type: str
++        path,  # type: str
++        error,  # type: str
++    ):
++        # type: (...) -> PrunedEntry
++        return PrunedEntry(noun=noun, path=path, paths=(), status=FAILED, detail=error)
++
++    @property
++    def disk_usage(self):
++        # type: () -> DiskUsage
++        return DiskUsage.aggregate(
++            self.path,
++            [
++                pruned_path.disk_usage
++                for pruned_path in self.paths
++                if pruned_path.status == SUCCEEDED
++            ],
++        )
++
++
++@attr.s(frozen=True)
++class PrunePaths(object):
++    """A unit of deletion: one logical entry backed by one or more on-disk paths."""
++
++    noun = attr.ib()  # type: str
++    path = attr.ib()  # type: str
++    paths = attr.ib()  # type: Tuple[str, ...]
++
++
++if TYPE_CHECKING:
++    PipActions = Tuple[List[PrunePaths], "OrderedDict[str, Pip]"]
++
++
++def _zero_disk_usage(path=""):
++    # type: (str) -> DiskUsage
++    return DiskUsage(path=path, subdirs=0, files=0, size=0)
++
++
++def _prune_paths(prune_paths):
++    # type: (PrunePaths) -> PrunedEntry
++    """Delete a planned entry, verifying each backing path is actually gone.
++
++    Errors never escape: a path that cannot be removed is reported as `failed` so unrelated
++    entries can still be processed and so dependent entries can be retained.
++    """
++    pruned_paths = []  # type: List[PrunedPath]
++    errors = []  # type: List[str]
++    for path in prune_paths.paths:
++        # A path already removed by a prior run (or by a companion record in this same entry) is
++        # not a failure: re-running with the same cutoff simply re-converges against the disk.
++        if not os.path.lexists(path):
++            pruned_paths.append(
++                PrunedPath(path=path, status=SUCCEEDED, disk_usage=_zero_disk_usage(path))
++            )
++            continue
++        disk_usage = DiskUsage.collect(path)
++        error = None  # type: Optional[str]
++        try:
++            rmtree(path)
++        except OSError as e:
++            error = str(e)
++        if error is None and os.path.lexists(path):
++            error = "The path still exists after deletion was attempted."
++        if error is None:
++            pruned_paths.append(
++                PrunedPath(path=path, status=SUCCEEDED, disk_usage=disk_usage)
++            )
++        else:
++            pruned_paths.append(
++                PrunedPath(
++                    path=path,
++                    status=FAILED,
++                    disk_usage=_zero_disk_usage(path),
++                    error=error,
++                )
++            )
++            errors.append("{path}: {error}".format(path=path, error=error))
++    return PrunedEntry(
++        noun=prune_paths.noun,
++        path=prune_paths.path,
++        paths=tuple(pruned_paths),
++        status=FAILED if errors else SUCCEEDED,
++        detail="; ".join(errors) if errors else None,
+     )
+ 
+ 
+-def _prune_pip(
+-    dry_run,  # type: bool
+-    pip_path_to_prune,  # type: str
++def _append_unique(
++    paths,  # type: List[str]
++    path,  # type: Optional[str]
++):
++    # type: (...) -> None
++    if path and path not in paths:
++        paths.append(path)
++
++
++def _dependency_backing_paths(
++    deps,  # type: Iterable[AtomicCacheDir]
++    additional_cache_dirs_by_project_name_and_version,
++    # type: Mapping[Tuple[ProjectName, Version], Iterable[AtomicCacheDir]]
+ ):
+-    # type: (...) -> DiskUsage
+-    du = DiskUsage.collect(pip_path_to_prune)
+-    if not dry_run:
+-        safe_rmtree(pip_path_to_prune)
+-    return du
++    # type: (...) -> Tuple[str, ...]
++    paths = []  # type: List[str]
++    for cache_dir in deps:
++        if isinstance(cache_dir, InstalledWheelDir):
++            # The real wheel chroot directory (the install-hash dir for a plain copy or the
++            # wheel-hash chroot directory for symlink-style installs).
++            _append_unique(paths, os.path.dirname(cache_dir.path))
++            for packed_wheel_dir in PackedWheelDir.iter(cache_dir.install_hash):
++                _append_unique(paths, packed_wheel_dir.path)
++            for additional_dir in additional_cache_dirs_by_project_name_and_version.get(
++                (cache_dir.project_name, cache_dir.version), ()
++            ):
++                if os.path.lexists(additional_dir.path):
++                    _append_unique(paths, additional_dir.path)
++            if cache_dir.symlink_dir:
++                _append_unique(paths, cache_dir.symlink_dir)
++        elif isinstance(cache_dir, BootstrapDir):
++            _append_unique(paths, cache_dir.path)
++            for bootstrap_zip_dir in BootstrapZipDir.iter(cache_dir.bootstrap_hash):
++                _append_unique(paths, bootstrap_zip_dir.path)
++        else:
++            _append_unique(paths, cache_dir.path)
++    return tuple(path for path in paths if os.path.lexists(path))
++
++
++def _parent_backing_paths(pex_parent):
++    # type: (PexParent) -> PrunePaths
++    paths = [pex_parent.pex_dir.path]  # type: List[str]
++    if isinstance(pex_parent.pex_dir, VenvDirs):
++        _append_unique(paths, pex_parent.pex_dir.short_dir)
++    return PrunePaths(
++        noun="cached PEX",
++        path=pex_parent.pex_dir.path,
++        paths=tuple(path for path in paths if os.path.lexists(path)),
++    )
+ 
+ 
+ class Cache(CacheAwareMixin, OutputMixin, BuildTimeCommand):
+@@ -421,318 +557,700 @@ class Cache(CacheAwareMixin, OutputMixin, BuildTimeCommand):
+ 
+         return Ok()
+ 
+-    def _prune(self):
+-        # type: () -> Result
++    @staticmethod
++    def _cutoff_display(cutoff):
++        # type: (Cutoff) -> str
++        if cutoff.spec.endswith("ago") or cutoff.spec[-1].isdigit():
++            return cutoff.spec
++        return "{cutoff} ago".format(cutoff=cutoff.spec)
++
++    def _print_entry(
++        self,
++        fp,  # type: typing.IO[str]
++        result,  # type: PrunedEntry
++    ):
++        # type: (...) -> None
++        if result.status == SKIPPED:
++            print(
++                "  skipped: {noun} {path} ({detail})".format(
++                    noun=result.noun, path=result.path, detail=result.detail
++                ),
++                file=fp,
++            )
++        elif result.status == FAILED:
++            print(
++                "  failed: {noun} {path}: {detail}".format(
++                    noun=result.noun, path=result.path, detail=result.detail
++                ),
++                file=fp,
++            )
++        else:
++            reclaimed = result.disk_usage.size
++            reclaimed_msg = (
++                " (reclaimed {size})".format(size=self.options.amount_func(reclaimed))
++                if reclaimed
++                else ""
++            )
++            print(
++                "  succeeded: {noun} {path}{reclaimed}".format(
++                    noun=result.noun, path=result.path, reclaimed=reclaimed_msg
++                ),
++                file=fp,
++            )
+ 
+-        with self.output(self.options) as fp:
+-            if not self.options.dry_run:
+-                locked = self.lock_cache_for_delete(out=fp)
+-                print(file=fp)
+-                if not locked:
+-                    return Error("No cache entries pruned.")
++    def _execute_entries(
++        self,
++        fp,  # type: typing.IO[str]
++        heading,  # type: str
++        entries,  # type: Tuple[PrunePaths, ...]
++        noun,  # type: str
++        extra_results=(),  # type: Iterable[PrunedEntry]
++    ):
++        # type: (...) -> List[PrunedEntry]
++        if not entries and not extra_results:
++            return []
++
++        print(heading, file=fp)
++        results = list(extra_results)  # type: List[PrunedEntry]
++        if entries:
++            # A failure in one entry never blocks the others; each result is reported individually
++            # as succeeded, failed or (by the caller for blocked dependencies) skipped.
++            results.extend(
++                iter_map_parallel(
++                    entries,
++                    _prune_paths,
++                    noun=noun,
++                    verb="prune",
++                    verb_past="pruned",
++                )
++            )
++        results.sort(key=lambda r: (r.status, r.noun, r.path))
++        for result in results:
++            self._print_entry(fp, result)
++        print(file=fp)
++        return results
+ 
+-        cutoff = self.options.cutoff
+-        prunable = Prunable.scan(cutoff.cutoff)
+-        unused_deps = tuple(prunable.iter_other_unused_deps())
+-        unused_wheels = tuple(dep for dep in unused_deps if isinstance(dep, InstalledWheelDir))
+-
+-        additional_cache_dirs_by_project_name_and_version = defaultdict(
+-            list
+-        )  # type: DefaultDict[Tuple[ProjectName, Version], List[AtomicCacheDir]]
+-        cached_artifact_dirs = itertools.chain(
+-            BuiltWheelDir.iter_all(), DownloadDir.iter_all()
+-        )  # type: Iterator[Union[BuiltWheelDir, DownloadDir]]
+-        for cache_dir in cached_artifact_dirs:
+-            additional_cache_dirs_by_project_name_and_version[
+-                (cache_dir.project_name, cache_dir.version)
+-            ].append(cache_dir)
+-
+-        prune_cache_dir = functools.partial(
+-            _prune_cache_dir,
+-            self.options.dry_run,
+-            additional_cache_dirs_by_project_name_and_version,
++    @staticmethod
++    def _pip_actions(
++        plan=None,
++        surviving_candidate_parents=None,
++        all_pips=None,
++    ):
++        # type: (...) -> PipActions
++        """Resolves Pip installations to prune and Pip versions retained to run cache ops against.
++
++        When `plan` is passed the resolution reflects scan-time intent (used for the plan /
++        dry-run): a Pip whose owning PEX is a prune candidate is itself a candidate. When
++        `surviving_candidate_parents` is passed the resolution reflects the current disk after
++        parent deletion was attempted: any candidate parent that survived (including via a failed
++        deletion) retains both its Pip PEX and Pip cache.
++
++        `all_pips` is a pre-deletion snapshot: instantiating a `Pip` ensures its venv exists and
++        the Pip PEX `.deps` symlink into the shared installed wheel chroots, so re-scanning after
++        wheel chroots are deleted would chase dangling symlinks. The snapshot is always taken
++        before any deletion and reused.
++        """
++        if all_pips is None:
++            all_pips = list(iter_all_pips(record_access=False))
++        if surviving_candidate_parents is not None:
++            # Start with every PEX dir currently on disk (recent or concurrent) and then account
++            # for candidate parents that survived their deletion attempt directly, closing the
++            # gap where a removed venv short-hash symlink would hide a surviving venv from a glob.
++            surviving_hashes = {
++                pex_dir.pex_hash for pex_dir in Prunable.iter_current_pex_dirs()
++            }
++            for pex_parent in surviving_candidate_parents:
++                if os.path.lexists(pex_parent.pex_dir.path):
++                    surviving_hashes.add(pex_parent.pex_dir.pex_hash)
++        else:
++            candidate_hashes = {
++                pex_parent.pex_dir.pex_hash for pex_parent in (plan.parents if plan else ())
++            }
++            surviving_hashes = {
++                pip.pex_hash for pip in all_pips if pip.pex_hash not in candidate_hashes
++            }
++
++        retained_versions = OrderedSet(
++            pip.version for pip in all_pips if pip.pex_hash in surviving_hashes
+         )
+-        prune_pip = functools.partial(_prune_pip, self.options.dry_run)
++        retained_pips = OrderedDict()  # type: OrderedDict[str, Pip]
++        for pip in all_pips:
++            if pip.version in retained_versions:
++                retained_pips.setdefault(str(pip.version), pip)
++
++        entries = []  # type: List[PrunePaths]
++        seen_paths = set()  # type: Set[str]
++        for pip in all_pips:
++            if pip.pex_hash in surviving_hashes:
++                continue
++            full_version_prune = pip.version not in retained_versions
++            remove_path = pip.pex_dir.base_dir if full_version_prune else pip.pex_dir.path
++            if remove_path in seen_paths or not os.path.lexists(remove_path):
++                continue
++            seen_paths.add(remove_path)
++            entries.append(
++                PrunePaths(
++                    noun="Pip" if full_version_prune else "Pip PEX",
++                    path=remove_path,
++                    paths=(remove_path,),
++                )
++            )
++        return entries, retained_pips
++
++    def _pip_cache_results(
++        self,
++        fp,  # type: typing.IO[str]
++        retained_pips,  # type: Mapping[str, Pip]
++        removable_wheels,  # type: Set[Tuple[ProjectName, Version]]
++    ):
++        # type: (...) -> List[PrunedEntry]
++        if not removable_wheels or not retained_pips:
++            return []
++
++        pips = list(retained_pips.values())
++        results = []  # type: List[PrunedEntry]
++
++        def spawn_list(pip):
++            # type: (Pip) -> SpawnedJob[Tuple[Pip, bytes]]
++            return SpawnedJob.stdout(
++                job=pip.spawn_cache_list(),
++                result_func=lambda stdout: (pip, stdout),
++            )
++
++        pip_removes = []  # type: List[Tuple[Pip, str, ProjectNameAndVersion]]
++        for list_result in execute_parallel(
++            inputs=pips, spawn_func=spawn_list, error_handler=Retain()
++        ):
++            pip, payload = list_result
++            if isinstance(payload, Exception):
++                # A `pip cache list` failure is independent of every other Pip: record it and skip
++                # removes for this Pip only; completed filesystem operations are not rolled back.
++                results.append(
++                    PrunedEntry.failed_external(
++                        noun="Pip cache list",
++                        path=str(pip.version),
++                        error="`pip cache list` failed: {error}".format(error=payload),
++                    )
++                )
++                continue
++            try:
++                project_name_and_versions = tuple(
++                    ProjectNameAndVersion.from_filename(wheel_file)
++                    for wheel_file in payload.decode("utf-8").splitlines()
++                    if wheel_file
++                )
++            except (UnicodeDecodeError, UnrecognizedDistributionFormat) as e:
++                results.append(
++                    PrunedEntry.failed_external(
++                        noun="Pip cache list",
++                        path=str(pip.version),
++                        error="could not parse `pip cache list` output: {error}".format(error=e),
++                    )
++                )
++                continue
++            for pnav in project_name_and_versions:
++                if (
++                    pnav.canonicalized_project_name,
++                    pnav.canonicalized_version,
++                ) in removable_wheels:
++                    pip_removes.append(
++                        (
++                            pip,
++                            "{project_name}-{version}*".format(
++                                project_name=pnav.project_name, version=pnav.version
++                            ),
++                            pnav,
++                        )
++                    )
+ 
+-        def prune_unused_deps(additional=False):
+-            # type: (bool) -> None
++        if not pip_removes:
++            return results
+ 
+-            if not unused_deps:
+-                return
+-            disk_usages = tuple(
+-                iter_map_parallel(
+-                    unused_deps,
+-                    prune_cache_dir,
+-                    noun="cached PEX dependency",
+-                    verb="prune",
+-                    verb_past="pruned",
++        files_removed_pattern = re.compile(rb"Files removed:\s*(\d+)")
++
++        def spawn_remove(args):
++            # type: (Tuple[Pip, str, ProjectNameAndVersion]) -> SpawnedJob
++            pip, wheel_name_glob, _pnav = args
++            return SpawnedJob.stdout(
++                job=pip.spawn_cache_remove(wheel_name_glob),
++                result_func=lambda stdout: (args, stdout),
++            )
++
++        removes_by_pip = Counter()  # type: typing.Counter[str]
++        for remove_result in execute_parallel(
++            inputs=pip_removes, spawn_func=spawn_remove, error_handler=Retain()
++        ):
++            args, payload = remove_result
++            pip, wheel_name_glob, _pnav = args
++            if isinstance(payload, Exception):
++                results.append(
++                    PrunedEntry.failed_external(
++                        noun="Pip cache remove",
++                        path="{pip}: {glob}".format(pip=pip.version, glob=wheel_name_glob),
++                        error="`pip cache remove {glob}` failed: {error}".format(
++                            glob=wheel_name_glob, error=payload
++                        ),
++                    )
++                )
++                continue
++            # Unlike the prior parser, unparseable output (or an empty/zero parse) is not silently
++            # treated as success: only the documented "Files removed: N" line counts.
++            match = files_removed_pattern.search(payload)
++            if not match:
++                results.append(
++                    PrunedEntry.failed_external(
++                        noun="Pip cache remove",
++                        path="{pip}: {glob}".format(pip=pip.version, glob=wheel_name_glob),
++                        error="could not parse `pip cache remove` output: {output!r}".format(
++                            output=payload.decode("utf-8", errors="replace").strip()
++                        ),
++                    )
+                 )
++                continue
++            removes_by_pip[pip.version.value] += int(match.group(1))
++
++        if removes_by_pip:
++            total = sum(removes_by_pip.values())
++            print(
++                "Pruned {total} cached {wheels} from {count} Pip {version}:".format(
++                    total=total,
++                    wheels=pluralize(total, "wheel"),
++                    count=len(removes_by_pip),
++                    version=pluralize(len(removes_by_pip), "version"),
++                ),
++                file=fp,
+             )
+-            if disk_usages:
++            for pip_version, remove_count in sorted(removes_by_pip.items()):
+                 print(
+-                    "Pruned {count} {additional}unused PEX {dependencies}.".format(
+-                        count=len(disk_usages),
+-                        additional="additional " if additional else "",
+-                        dependencies=pluralize(disk_usages, "dependency"),
++                    "Pip {version}: removed {remove_count} {wheels}".format(
++                        version=pip_version,
++                        remove_count=remove_count,
++                        wheels=pluralize(remove_count, "wheel"),
+                     ),
+                     file=fp,
+                 )
+-                print(self._render_usage(disk_usages))
++            print(file=fp)
++        return results
++
++    @staticmethod
++    def _interpreter_prune_paths(candidate_venv_paths=None):
++        # type: (Optional[Set[str]]) -> List[PrunePaths]
++
++        def eligible(interpreter_dir):
++            # type: (InterpreterDir) -> bool
++            try:
++                valid = interpreter_dir.valid()
++            except (OSError, ValueError):
++                # An unreadable or corrupt INTERP-INFO file is as invalid as a missing
++                # interpreter binary and should never abort the rest of the prune.
++                valid = False
++            if not valid:
++                return True
++            venv_dir = interpreter_dir.venv_dir()
++            if venv_dir is None:
++                return False
++            if candidate_venv_paths is None:
++                # Execution time: the interpreter cache entry is only pruned once its venv is
++                # confirmed gone; a failed venv deletion retains it.
++                return not os.path.lexists(venv_dir.path)
++            return venv_dir.path in candidate_venv_paths
++
++        return [
++            PrunePaths(
++                noun="cached interpreter",
++                path=interpreter_dir.path,
++                paths=(interpreter_dir.path,),
++            )
++            for interpreter_dir in InterpreterDir.iter_all()
++            if eligible(interpreter_dir)
++        ]
++
++    def _prune(self):
++        # type: () -> Result
++
++        dry_run = self.options.dry_run
++        cutoff = self.options.cutoff
++
++        with self.output(self.options) as fp:
++            if not dry_run:
++                locked = self.lock_cache_for_delete(out=fp)
+                 print(file=fp)
++                if not locked:
++                    return Error("No cache entries pruned.")
+ 
+-        def prune_pips():
+-            # type: () -> None
+-            if not prunable.pips.paths:
+-                return
++            plan = Prunable.scan(cutoff.cutoff)
++
++            # Snapshot Pip installations before anything is deleted: instantiating a Pip ensures
++            # its venv and follows the Pip PEX `.deps` symlinks into shared installed wheel
++            # chroots, which phase 2 may remove; a post-deletion re-scan would be invalid.
++            all_pips = list(iter_all_pips(record_access=False))
++
++            additional_cache_dirs_by_project_name_and_version = defaultdict(
++                list
++            )  # type: DefaultDict[Tuple[ProjectName, Version], List[AtomicCacheDir]]
++            cached_artifact_dirs = itertools.chain(
++                BuiltWheelDir.iter_all(), DownloadDir.iter_all()
++            )  # type: Iterator[Union[BuiltWheelDir, DownloadDir]]
++            for cache_dir in cached_artifact_dirs:
++                additional_cache_dirs_by_project_name_and_version[
++                    (cache_dir.project_name, cache_dir.version)
++                ].append(cache_dir)
++
++            def dep_prune_paths(
++                noun,  # type: str
++                dep_records,  # type: Iterable[AtomicCacheDir]
++            ):
++                # type: (...) -> PrunePaths
++                records = tuple(dep_records)
++                backing_paths = _dependency_backing_paths(
++                    records, additional_cache_dirs_by_project_name_and_version
++                )
++                return PrunePaths(noun=noun, path=records[0].path, paths=backing_paths)
+ 
+-            print(
+-                "{pruned} {count} {cached_pex}.".format(
+-                    pruned="Would have pruned" if self.options.dry_run else "Pruned",
+-                    count=len(prunable.pips.paths),
+-                    cached_pex=pluralize(prunable.pips.paths, "Pip PEX"),
+-                ),
+-                file=fp,
++            parent_entries = tuple(
++                _parent_backing_paths(pex_parent) for pex_parent in plan.parents
++            )
++            dependency_entries = tuple(
++                dep_prune_paths("cached PEX dependency", dependency_use.records)
++                for dependency_use in plan.dependency_uses
++            )
++
++            orphan_records_by_path = OrderedDict()  # type: OrderedDict[str, List[AtomicCacheDir]]
++            for dep in plan.orphan_dependencies:
++                orphan_records_by_path.setdefault(dep.path, []).append(dep)
++            orphan_entries = tuple(
++                dep_prune_paths("cached PEX dependency", records)
++                for records in orphan_records_by_path.values()
+             )
++
++            pip_entries, retained_pips = self._pip_actions(plan=plan, all_pips=all_pips)
++            candidate_venv_paths = {
++                pex_parent.pex_dir.path
++                for pex_parent in plan.parents
++                if isinstance(pex_parent.pex_dir, VenvDirs)
++            }
++            interpreter_entries = tuple(
++                self._interpreter_prune_paths(candidate_venv_paths=candidate_venv_paths)
++            )
++
++            # --- Reviewable plan -----------------------------------------------------------
+             print(
+-                self._render_usage(
+-                    tuple(
+-                        iter_map_parallel(
+-                            prunable.pips.paths,
+-                            function=prune_pip,
+-                            noun="Pip",
+-                            verb="prune",
+-                            verb_past="pruned",
+-                        )
+-                    )
++                "{mode} Pex cache prune plan for {pex_root} (cutoff: {cutoff}):".format(
++                    mode="Dry-run" if dry_run else "Executing",
++                    pex_root=ENV.PEX_ROOT,
++                    cutoff=self._cutoff_display(cutoff),
+                 ),
+                 file=fp,
+             )
+             print(file=fp)
+ 
+-        def prune_pip_caches():
+-            # type: () -> None
+-
+-            prunable_wheels = set()
+-            for wheel in unused_wheels:
+-                prunable_pnav = ProjectNameAndVersion.from_filename(wheel.wheel_name)
+-                prunable_wheels.add(
+-                    (prunable_pnav.canonicalized_project_name, prunable_pnav.canonicalized_version)
++            if not plan.parents:
++                print(
++                    "There are no cached PEX zipapps or venvs last accessed prior to "
++                    "{cutoff}.".format(cutoff=self._cutoff_display(cutoff)),
++                    file=fp,
+                 )
+-            if not prunable_wheels:
+-                return
+-
+-            def spawn_list(pip):
+-                # type: (Pip) -> SpawnedJob[Tuple[ProjectNameAndVersion, ...]]
+-                return SpawnedJob.stdout(
+-                    job=pip.spawn_cache_list(),
+-                    result_func=lambda stdout: tuple(
+-                        ProjectNameAndVersion.from_filename(wheel_file)
+-                        for wheel_file in stdout.decode("utf-8").splitlines()
+-                        if wheel_file
++                print(file=fp)
++            else:
++                print(
++                    "1. Cached PEX parents to remove first ({count}):".format(
++                        count=len(parent_entries)
+                     ),
++                    file=fp,
+                 )
++                for pex_parent in plan.parents:
++                    print("     {path}".format(path=pex_parent.pex_dir.path), file=fp)
++                    print("       reason: {reason}".format(reason=pex_parent.reason), file=fp)
++                print(file=fp)
+ 
+-            pip_removes = []  # type: List[Tuple[Pip, str]]
+-            for pip, project_name_and_versions in zip(
+-                prunable.pips.pips,
+-                execute_parallel(inputs=prunable.pips.pips, spawn_func=spawn_list),
+-            ):
+-                for pnav in project_name_and_versions:
+-                    if (
+-                        pnav.canonicalized_project_name,
+-                        pnav.canonicalized_version,
+-                    ) in prunable_wheels:
+-                        pip_removes.append(
+-                            (
+-                                pip,
+-                                "{project_name}-{version}*".format(
+-                                    project_name=pnav.project_name, version=pnav.version
+-                                ),
+-                            )
+-                        )
+-
+-            def parse_remove(stdout):
+-                # type: (bytes) -> int
+-
+-                # The output from `pip cache remove` is a line like:
+-                # Files removed: 42
+-                _, sep, count = stdout.decode("utf-8").partition(":")
+-                if sep != ":" or not count:
+-                    return 0
+-                try:
+-                    return int(count)
+-                except ValueError:
+-                    return 0
+-
+-            def spawn_remove(args):
+-                # type: (Tuple[Pip, str]) -> SpawnedJob[int]
+-                pip, wheel_name_glob = args
+-                return SpawnedJob.stdout(
+-                    job=pip.spawn_cache_remove(wheel_name_glob),
+-                    result_func=parse_remove,
++            print(
++                "2. Shared PEX dependencies removable once their consumers are confirmed gone "
++                "({count}):".format(count=len(dependency_entries)),
++                file=fp,
++            )
++            for dependency_use in plan.dependency_uses:
++                print(
++                    "     {path} (consumers: {consumers})".format(
++                        path=dependency_use.dep.path,
++                        consumers=", ".join(dependency_use.candidate_consumers),
++                    ),
++                    file=fp,
+                 )
++            print(file=fp)
+ 
+-            removes_by_pip = Counter()  # type: typing.Counter[str]
+-            for pip, remove_count in zip(
+-                [pip for pip, _ in pip_removes],
+-                execute_parallel(inputs=pip_removes, spawn_func=spawn_remove),
+-            ):
+-                removes_by_pip[pip.version.value] += remove_count
+-            if removes_by_pip:
+-                total = sum(removes_by_pip.values())
++            print(
++                "3. Shared PEX dependencies retained by consumers not selected for pruning "
++                "({count}):".format(count=len(plan.blocked_dependencies)),
++                file=fp,
++            )
++            for dependency_use in plan.blocked_dependencies:
+                 print(
+-                    "Pruned {total} cached {wheels} from {count} Pip {version}:".format(
+-                        total=total,
+-                        wheels=pluralize(total, "wheel"),
+-                        count=len(removes_by_pip),
+-                        version=pluralize(removes_by_pip, "version"),
++                    "     {path} (still used by: {consumers})".format(
++                        path=dependency_use.dep.path,
++                        consumers=", ".join(dependency_use.retained_consumers),
+                     ),
+                     file=fp,
+                 )
+-                for pip_version, remove_count in sorted(removes_by_pip.items()):
+-                    print(
+-                        "Pip {version}: removed {remove_count} {wheels}".format(
+-                            version=pip_version,
+-                            remove_count=remove_count,
+-                            wheels=pluralize(remove_count, "wheel"),
+-                        ),
+-                        file=fp,
+-                    )
+-                print(file=fp)
+-
+-        def prune_interpreters():
+-            # type: () -> None
+-
+-            interpreters_to_prune = tuple(prunable.iter_interpreters())
+-            if not interpreters_to_prune:
+-                return
++            print(file=fp)
+ 
+             print(
+-                "{pruned} {count} {cached_interpreter}.".format(
+-                    pruned="Would have pruned" if self.options.dry_run else "Pruned",
+-                    count=len(interpreters_to_prune),
+-                    cached_interpreter=pluralize(interpreters_to_prune, "cached interpreter"),
++                "4. Unreferenced dependencies with no remaining consumers ({count}):".format(
++                    count=len(orphan_entries)
+                 ),
+                 file=fp,
+             )
++            for entry in orphan_entries:
++                print("     {path}".format(path=entry.path), file=fp)
++            print(file=fp)
++
+             print(
+-                self._render_usage(
+-                    tuple(
+-                        iter_map_parallel(
+-                            interpreters_to_prune,
+-                            function=prune_cache_dir,
+-                            noun="interpreter",
+-                            verb="prune",
+-                            verb_past="pruned",
+-                        )
+-                    )
++                "5. Pip installations to prune ({count}); {retained} Pip "
++                "{versions} retained:".format(
++                    count=len(pip_entries),
++                    retained=len(retained_pips),
++                    versions=pluralize(len(retained_pips), "version"),
+                 ),
+                 file=fp,
+             )
++            for entry in pip_entries:
++                print("     {path}".format(path=entry.path), file=fp)
++            orphan_wheel_pnavs = OrderedSet()
++            for records in orphan_records_by_path.values():
++                for dep in records:
++                    if isinstance(dep, InstalledWheelDir):
++                        pnav = ProjectNameAndVersion.from_filename(dep.wheel_name)
++                        orphan_wheel_pnavs.add(
++                            (pnav.canonicalized_project_name, pnav.canonicalized_version)
++                        )
++            if orphan_wheel_pnavs and retained_pips:
++                print(
++                    "     Pip caches would be pruned of {count} cached {wheels}".format(
++                        count=len(orphan_wheel_pnavs),
++                        wheels=pluralize(len(orphan_wheel_pnavs), "wheel"),
++                    ),
++                    file=fp,
++                )
+             print(file=fp)
+ 
+-        if not prunable.pex_dirs:
+             print(
+-                "There are no cached PEX zipapps or venvs last accessed prior to {cutoff}.".format(
+-                    cutoff=(
+-                        cutoff.spec
+-                        if cutoff.spec.endswith("ago") or cutoff.spec[-1].isdigit()
+-                        else "{cutoff} ago".format(cutoff=cutoff.spec)
+-                    ),
++                "6. Cached interpreters to prune ({count}):".format(
++                    count=len(interpreter_entries)
+                 ),
+                 file=fp,
+             )
++            for entry in interpreter_entries:
++                print("     {path}".format(path=entry.path), file=fp)
+             print(file=fp)
+-            prune_unused_deps()
+-            prune_pip_caches()
+-            prune_interpreters()
+-            return Ok()
+ 
+-        print(
+-            "{pruned} {count} {cached_pex}.".format(
+-                pruned="Would have pruned" if self.options.dry_run else "Pruned",
+-                count=len(prunable.pex_dirs),
+-                cached_pex=pluralize(prunable.pex_dirs, "cached PEX"),
+-            ),
+-            file=fp,
+-        )
+-        print(
+-            self._render_usage(
+-                tuple(
+-                    iter_map_parallel(
+-                        prunable.pex_dirs,
+-                        prune_cache_dir,
+-                        noun="cached PEX",
+-                        verb="prune",
+-                        verb_past="pruned",
++            if dry_run:
++                # A dry run presents the same dependency-safe ordering and blocking reasons but
++                # performs no deletion and changes no state; every amount below is potential.
++                def potential_usage(label, entries):
++                    # type: (str, Tuple[PrunePaths, ...]) -> None
++                    if not entries:
++                        return
++                    disk_usages = map_parallel(
++                        inputs=tuple(
++                            path for entry in entries for path in entry.paths
++                        ),
++                        function=DiskUsage.collect,
++                        noun="path",
++                        verb="measure",
++                        verb_past="measured",
++                    )
++                    print(
++                        "{label} {count} {entries}: {usage}".format(
++                            label=label,
++                            count=len(entries),
++                            entries=pluralize(entries, "entry"),
++                            usage=self._render_usage(disk_usages),
++                        ),
++                        file=fp,
+                     )
+-                )
+-            ),
+-            file=fp,
+-        )
+-        print(file=fp)
+ 
+-        deps = tuple(prunable.iter_pex_unused_deps())
+-        if self.options.dry_run:
+-            print(
+-                "Might have pruned up to {count} {cached_pex_dependency}.".format(
+-                    count=len(deps),
+-                    cached_pex_dependency=pluralize(deps, "cached PEX dependency"),
+-                ),
+-                file=fp,
++                potential_usage("Would prune cached PEX parents:", parent_entries)
++                potential_usage("Would prune shared PEX dependencies:", dependency_entries)
++                potential_usage("Would prune unreferenced dependencies:", orphan_entries)
++                potential_usage("Would prune Pip installations:", pip_entries)
++                potential_usage("Would prune cached interpreters:", interpreter_entries)
++                print(file=fp)
++                print(
++                    "Dry run: no cache entries were pruned. Shared dependencies marked retained "
++                    "in section 3 will not be removed; dependencies in section 2 are only removed "
++                    "if all of their consumers in section 1 are removed successfully.",
++                    file=fp,
++                )
++                return Ok()
++
++            all_results = []  # type: List[PrunedEntry]
++
++            # Phase 1: remove parents first; shared dependencies are decided afterwards based on
++            # what actually survives.
++            all_results.extend(
++                self._execute_entries(
++                    fp,
++                    "Results - cached PEX parents:",
++                    parent_entries,
++                    noun="cached PEX",
++                )
+             )
+-            print(
+-                self._render_usage(
+-                    tuple(
+-                        iter_map_parallel(
+-                            deps,
+-                            prune_cache_dir,
++
++            # Re-converge against the current disk rather than trusting the scan-time graph: a
++            # parent that survived a failed deletion keeps every dependency it references.
++            retained_dep_consumers = Prunable.iter_retained_dep_consumers(plan.parents)
++
++            # If a surviving candidate parent can no longer enumerate its dependencies (e.g. a
++            # partially deleted PEX-INFO), fall back to the scan-time graph and conservatively
++            # retain everything it was known to consume.
++            surviving_candidate_paths = {
++                pex_parent.pex_dir.path
++                for pex_parent in plan.parents
++                if os.path.lexists(pex_parent.pex_dir.path)
++            }
++            for dependency_use in plan.dependency_uses:
++                surviving = [
++                    consumer
++                    for consumer in dependency_use.candidate_consumers
++                    if consumer in surviving_candidate_paths
++                    and consumer not in retained_dep_consumers.get(dependency_use.dep.path, ())
++                ]
++                if surviving:
++                    retained_dep_consumers.setdefault(dependency_use.dep.path, []).extend(
++                        surviving
++                    )
++
++            # Phase 2: shared dependencies; skip any with a surviving consumer.
++            shared_results = []  # type: List[PrunedEntry]
++            removable_dependency_entries = []  # type: List[PrunePaths]
++            for dependency_use, entry in zip(plan.dependency_uses, dependency_entries):
++                surviving = retained_dep_consumers.get(dependency_use.dep.path)
++                if surviving:
++                    shared_results.append(
++                        PrunedEntry.skipped(
+                             noun="cached PEX dependency",
+-                            verb="prune",
+-                            verb_past="pruned",
++                            path=dependency_use.dep.path,
++                            reason="retained by surviving consumer(s): {consumers}".format(
++                                consumers=", ".join(surviving)
++                            ),
+                         )
+                     )
+-                )
+-            )
+-            print(file=fp)
+-            prune_pips()
+-            prune_interpreters()
+-        else:
+-            disk_usages = tuple(
+-                iter_map_parallel(
+-                    deps,
+-                    prune_cache_dir,
++                else:
++                    removable_dependency_entries.append(entry)
++            all_results.extend(
++                self._execute_entries(
++                    fp,
++                    "Results - shared PEX dependencies:",
++                    tuple(removable_dependency_entries),
+                     noun="cached PEX dependency",
+-                    verb="prune",
+-                    verb_past="pruned",
++                    extra_results=shared_results,
+                 )
+             )
+-            if deps and not disk_usages:
+-                print(
+-                    "No cached PEX dependencies were able to be pruned; all have un-pruned "
+-                    "cached PEX dependents.",
+-                    file=fp,
++
++            # Phase 3: unreferenced (orphan) dependencies.
++            orphan_results = self._execute_entries(
++                fp,
++                "Results - unreferenced PEX dependencies:",
++                orphan_entries,
++                noun="cached PEX dependency",
++            )
++            all_results.extend(orphan_results)
++
++            # Pip-cache wheel files are only removable for orphan wheels whose chroots are
++            # confirmed gone (a failed chroot deletion retains its Pip-cache copies) and which no
++            # surviving PEX references.
++            removable_pip_wheels = set()  # type: Set[Tuple[ProjectName, Version]]
++            retained_pip_wheel_entries = []  # type: List[PrunedEntry]
++            for path, records in orphan_records_by_path.items():
++                wheel_names = [
++                    dep.wheel_name for dep in records if isinstance(dep, InstalledWheelDir)
++                ]
++                if not wheel_names or retained_dep_consumers.get(path):
++                    continue
++                if os.path.lexists(path):
++                    # The wheel chroot survived; its Pip-cache copies must survive too.
++                    retained_pip_wheel_entries.append(
++                        PrunedEntry.skipped(
++                            noun="Pip cached wheel",
++                            path=path,
++                            reason="retained because its installed wheel could not be removed",
++                        )
++                    )
++                    continue
++                for wheel_name in wheel_names:
++                    pnav = ProjectNameAndVersion.from_filename(wheel_name)
++                    removable_pip_wheels.add(
++                        (pnav.canonicalized_project_name, pnav.canonicalized_version)
++                    )
++
++            # Phase 4: prune wheel files from retained Pip caches (independent failures).
++            pip_cache_results = self._pip_cache_results(
++                fp, retained_pips, removable_pip_wheels
++            )
++            pip_cache_entries = retained_pip_wheel_entries + pip_cache_results
++            if pip_cache_entries:
++                print("Results - Pip caches:", file=fp)
++                for result in sorted(
++                    pip_cache_entries, key=lambda r: (r.status, r.noun, r.path)
++                ):
++                    self._print_entry(fp, result)
++                print(file=fp)
++            all_results.extend(pip_cache_entries)
++
++            # Phase 5: prune Pip PEXes / whole Pip versions re-resolved from the current disk.
++            current_pip_entries, _retained_pips = self._pip_actions(
++                surviving_candidate_parents=plan.parents, all_pips=all_pips
++            )
++            all_results.extend(
++                self._execute_entries(
++                    fp,
++                    "Results - Pip installations:",
++                    tuple(current_pip_entries),
++                    noun="Pip",
+                 )
+-            elif len(deps) == 1:
+-                print("Pruned the 1 cached PEX dependency.", file=fp)
+-            elif len(deps) > 1 and len(deps) == len(disk_usages):
+-                print(
+-                    "Pruned all {count} cached PEX dependencies.".format(count=len(deps)),
+-                    file=fp,
++            )
++
++            # Phase 6: interpreters whose binary is invalid or whose venv is confirmed gone.
++            current_interpreter_entries = tuple(self._interpreter_prune_paths())
++            all_results.extend(
++                self._execute_entries(
++                    fp,
++                    "Results - cached interpreters:",
++                    current_interpreter_entries,
++                    noun="cached interpreter",
+                 )
+-            elif len(deps) > 1:
+-                print(
+-                    "Pruned {count} of {total} cached PEX dependencies.".format(
+-                        count=len(disk_usages), total=len(deps)
+-                    ),
+-                    file=fp,
++            )
++
++            counts = Counter(result.status for result in all_results)  # type: typing.Counter[str]
++            succeeded = counts.get(SUCCEEDED, 0)
++            failed = counts.get(FAILED, 0)
++            skipped = counts.get(SKIPPED, 0)
++            reclaimed = DiskUsage.aggregate(
++                path=ENV.PEX_ROOT,
++                usages=[result.disk_usage for result in all_results if result.status == SUCCEEDED],
++            )
++            print(
++                "Prune results: {succeeded} succeeded, {failed} failed, {skipped} skipped.".format(
++                    succeeded=succeeded, failed=failed, skipped=skipped
++                ),
++                file=fp,
++            )
++            print(
++                "Disk space reclaimed (succeeded entries only): {usage}".format(
++                    usage=self._render_usage(reclaimed)
++                ),
++                file=fp,
++            )
++            print(file=fp)
++
++            if failed:
++                return Error(
++                    "{failed} {entries} failed to prune and {skipped} {dependencies} were skipped "
++                    "because of surviving dependents; re-run after resolving the reported "
++                    "failures.".format(
++                        failed=failed,
++                        entries=pluralize(failed, "entry"),
++                        skipped=skipped,
++                        dependencies=pluralize(skipped, "dependency"),
++                    )
+                 )
+-            if disk_usages:
+-                print(self._render_usage(disk_usages))
+-            if deps or disk_usages:
+-                print(file=fp)
+-            prune_unused_deps(additional=len(disk_usages) > 0)
+-            prune_pip_caches()
+-            prune_pips()
+-            prune_interpreters()
+-        return Ok()
++            return Ok()
+diff --git a/pex/common.py b/pex/common.py
+index a02302c6..0df68011 100644
+--- a/pex/common.py
++++ b/pex/common.py
+@@ -371,6 +371,52 @@ def safe_rmtree(directory):
+         shutil.rmtree(directory, True)
+ 
+ 
++def _make_writable_and_retry(func, path, exc_info):
++    # type: (Any, _Text, Any) -> None
++    # Files marked read-only (common on Windows and for vendored caches) defeat deletion; clear
++    # the read-only bit and retry the failed operation once.
++    try:
++        os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
++    except OSError:
++        pass
++    try:
++        func(path)
++    except Exception:
++        # The final determination of whether deletion succeeded is made by the caller verifying
++        # the path is gone; leave any lingering error in place for it to discover.
++        pass
++
++
++def rmtree(directory):
++    # type: (_Text) -> bool
++    """Delete a directory tree (or a symlink) if present, reporting failures.
++
++    Unlike :func:`safe_rmtree`, this does not silently swallow permission, file-in-use or
++    transient I/O errors: if anything under `directory` survives the removal attempt, an
++    `OSError` is raised so callers know the path is still present and any of its dependents must
++    be retained.
++
++    :return: `True` if `directory` was present and removed; `False` if it was already absent.
++    :raises OSError: if `directory` (or anything under it) could not be fully removed.
++    """
++    if not os.path.lexists(directory):
++        return False
++    if os.path.islink(directory) or not os.path.isdir(directory):
++        # os.unlink raises OSError itself if the entry cannot be removed.
++        os.unlink(directory)
++        return True
++
++    shutil.rmtree(directory, onerror=_make_writable_and_retry)
++
++    if os.path.lexists(directory):
++        raise OSError(
++            "Failed to fully remove {directory}: one or more paths remain.".format(
++                directory=directory
++            )
++        )
++    return True
++
++
+ def safe_sleep(seconds):
+     # type: (float) -> None
+     """Ensure that the thread sleeps at a minimum the requested seconds.
+diff --git a/tests/integration/cli/commands/test_cache_prune.py b/tests/integration/cli/commands/test_cache_prune.py
+index 902365c3..c25fc0cf 100644
+--- a/tests/integration/cli/commands/test_cache_prune.py
++++ b/tests/integration/cli/commands/test_cache_prune.py
+@@ -3,8 +3,10 @@
+ 
+ from __future__ import absolute_import
+ 
++import io
+ import os.path
+ import shutil
++import subprocess as stdlib_subprocess
+ import sys
+ import time
+ from datetime import datetime, timedelta
+@@ -26,8 +28,10 @@ from pex.cache.dirs import (
+     UserCodeDir,
+     VenvDirs,
+ )
++from pex.cli.commands.cache.command import FAILED, Cache
+ from pex.cli.commands.cache.du import DiskUsage
+ from pex.common import environment_as, safe_open
++from pex.jobs import Job
+ from pex.os import WINDOWS
+ from pex.pep_440 import Version
+ from pex.pep_503 import ProjectName
+@@ -610,3 +614,210 @@ def test_pip_prune(
+     assert set(pip_venvs_by_version.values()) == set(
+         VenvDirs.iter_all()
+     ), "Expected the pip1 venv to be pruned along with pip1 itself."
++
++
++def unzip_dir_for(pex_path):
++    # type: (str) -> UnzipDir
++    pex_info = PexInfo.from_pex(pex_path)
++    assert pex_info.pex_hash is not None
++    return UnzipDir.create(pex_info.pex_hash)
++
++
++def make_undeletable(path):
++    # type: (str) -> "list"
++
++    # When available, the immutable flag defeats deletion even for root (CI containers run as
++    # root); otherwise a read-only directory defeats deletion for a non-root user.
++    chattr = shutil.which("chattr")
++    immutable = False
++    if chattr is not None:
++        with open(os.devnull, "wb") as devnull:
++            immutable = (
++                stdlib_subprocess.call(
++                    [chattr, "+i", path], stdout=devnull, stderr=stdlib_subprocess.STDOUT
++                )
++                == 0
++            )
++    try:
++        os.chmod(path, 0o555)
++    except OSError:
++        pass
++
++    def restore():
++        # type: () -> None
++        if immutable and chattr is not None:
++            with open(os.devnull, "wb") as devnull:
++                stdlib_subprocess.call(
++                    [chattr, "-i", path], stdout=devnull, stderr=stdlib_subprocess.STDOUT
++                )
++        try:
++            os.chmod(path, 0o755)
++        except OSError:
++            pass
++
++    return [restore]
++
++
++def test_prune_failed_parent_retains_deps_and_retries_converge(
++    pex_root,  # type: str
++    ansicolors_zipapp_pex,  # type: AnsicolorsPex
++    cowsay_pex,  # type: CowsayPex
++):
++    # type: (...) -> None
++
++    execute_ansicolors_pex(ansicolors_zipapp_pex)
++    set_last_access_one_day_ago(cowsay_pex.path)
++    set_last_access_one_day_ago(ansicolors_zipapp_pex.path)
++
++    ansicolors_unzip = unzip_dir_for(ansicolors_zipapp_pex.path)
++    cowsay_unzip = unzip_dir_for(cowsay_pex.path)
++    assert os.path.isdir(ansicolors_unzip.path)
++    assert os.path.isdir(cowsay_unzip.path)
++    ansicolors_deps = tuple(ansicolors_unzip.iter_deps())
++    assert ansicolors_deps, "Expected the old ansicolors PEX to reference cached dependencies."
++
++    restores = make_undeletable(ansicolors_unzip.path)
++    try:
++        failed_prune = run_pex3("cache", "prune", "--older-than", "1 hour")
++    finally:
++        for restore in restores:
++            restore()
++
++    assert failed_prune.return_code != 0, failed_prune.output
++    assert "failed:" in failed_prune.output
++    assert "skipped:" in failed_prune.output
++    assert "succeeded:" in failed_prune.output
++
++    if not os.path.exists(ansicolors_unzip.path):
++        pytest.skip("Cannot enforce an undeletable cache directory on this platform.")
++
++    # The failed parent survives together with every wheel, bootstrap and user code directory it
++    # depends on; these are reported skipped because of the surviving consumer.
++    assert os.path.exists(ansicolors_unzip.path), failed_prune.output
++    for dep in ansicolors_deps:
++        assert os.path.exists(dep.path), (
++            "Expected {dep} to be retained by the failed parent: {output}".format(
++                dep=dep.path, output=failed_prune.output
++            )
++        )
++
++    # The independent old parent is still deleted, along with the cowsay wheel only it used.
++    assert not os.path.exists(cowsay_unzip.path)
++    assert_installed_wheels(expected_pip_wheels_plus("ansicolors"))
++
++    # Re-running with the same cutoff re-converges against the current disk: the previously blocked
++    # parent and its dependencies are now removed, with no failures reported.
++    retry = run_pex3("cache", "prune", "--older-than", "1 hour")
++    retry.assert_success()
++    assert "failed:" not in retry.output, retry.output
++    assert not os.path.exists(ansicolors_unzip.path)
++    for dep in ansicolors_deps:
++        assert not os.path.exists(dep.path), dep.path
++    assert_installed_wheels(expected_pip_wheels())
++
++
++def test_prune_dry_run_is_reviewable_and_non_mutating(
++    pex_root,  # type: str
++    ansicolors_zipapp_pex,  # type: AnsicolorsPex
++    cowsay_pex,  # type: CowsayPex
++):
++    # type: (...) -> None
++
++    execute_ansicolors_pex(ansicolors_zipapp_pex)
++    set_last_access_one_day_ago(cowsay_pex.path)
++
++    ansicolors_unzip = unzip_dir_for(ansicolors_zipapp_pex.path)
++    cowsay_unzip = unzip_dir_for(cowsay_pex.path)
++
++    pre_prune_du = du(pex_root)
++    result = run_pex3("cache", "prune", "--older-than", "1 hour", "--dry-run")
++    result.assert_success()
++
++    assert pre_prune_du == du(pex_root), "A dry run must not change cache state."
++    assert os.path.isdir(ansicolors_unzip.path)
++    assert os.path.isdir(cowsay_unzip.path)
++    assert "prune plan" in result.output
++    assert "Dry-run" in result.output
++    # The shared bootstrap / ansicolors wheel are blocked by the recent ansicolors consumer and the
++    # blocking reason is shown in the plan.
++    assert "still used by" in result.output
++
++
++class _FakePipVersion(str):
++    @property
++    def value(self):
++        # type: () -> str
++        return str(self)
++
++
++def _stdout_job(text):
++    # type: (str) -> Job
++    process = stdlib_subprocess.Popen(
++        args=[
++            sys.executable,
++            "-c",
++            "import sys; sys.stdout.write({text!r})".format(text=text),
++        ],
++        stdout=stdlib_subprocess.PIPE,
++        stderr=stdlib_subprocess.PIPE,
++    )
++    return Job(command=tuple(process.args), process=process)
++
++
++class _FakePip(object):
++    def __init__(
++        self,
++        version,  # type: str
++        list_job=None,  # type: Optional[Job]
++        remove_jobs=None,  # type: Optional[Dict[str, Job]]
++        raise_list=False,  # type: bool
++    ):
++        self.version = _FakePipVersion(version)
++        self._list_job = list_job
++        self._remove_jobs = remove_jobs or {}
++        self._raise_list = raise_list
++
++    def spawn_cache_list(self):
++        # type: () -> Job
++        if self._raise_list:
++            raise OSError("simulated spawn failure")
++        assert self._list_job is not None
++        return self._list_job
++
++    def spawn_cache_remove(self, wheel_name_glob):
++        # type: (str) -> Job
++        return self._remove_jobs[wheel_name_glob]
++
++
++def test_pip_cache_failures_are_independent_and_not_silent():
++    # type: () -> None
++
++    removable_wheels = {(ProjectName("foo"), Version("1.0"))}
++    listed_wheel = "/some/pip-cache/wheels/foo-1.0-py3-none-any.whl\n"
++
++    good_pip = _FakePip(
++        "9.1",
++        list_job=_stdout_job(listed_wheel),
++        remove_jobs={"foo-1.0*": _stdout_job("Files removed: 2\n")},
++    )
++    bad_output_pip = _FakePip(
++        "9.2",
++        list_job=_stdout_job(listed_wheel),
++        remove_jobs={"foo-1.0*": _stdout_job("something went wrong\n")},
++    )
++    broken_list_pip = _FakePip("9.3", raise_list=True)
++
++    out = io.StringIO()
++    # A failure from one Pip (list spawn error, unparseable remove output) must not roll back the
++    # successful removals from another Pip nor abort processing.
++    results = Cache._pip_cache_results(
++        None,  # type: ignore[arg-type]
++        out,
++        {"9.1": good_pip, "9.2": bad_output_pip, "9.3": broken_list_pip},
++        removable_wheels,
++    )
++    statuses = {(result.noun, result.status) for result in results}
++    assert ("Pip cache list", FAILED) in statuses
++    assert ("Pip cache remove", FAILED) in statuses, statuses
++    assert "removed 2" in out.getvalue()
++

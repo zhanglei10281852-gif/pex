@@ -3,12 +3,11 @@
 
 from __future__ import absolute_import, print_function
 
-import functools
 import itertools
 import os
 import re
 from argparse import Action, ArgumentError, _ActionsContainer
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timedelta
 
 from pex.cache.dirs import (
@@ -19,22 +18,30 @@ from pex.cache.dirs import (
     CacheDir,
     DownloadDir,
     InstalledWheelDir,
+    InterpreterDir,
     PackedWheelDir,
     VenvDirs,
 )
-from pex.cache.prunable import Prunable
+from pex.cache.prunable import PexParent, Prunable
 from pex.cli.command import BuildTimeCommand
 from pex.cli.commands.cache.bytes import ByteAmount, ByteUnits
 from pex.cli.commands.cache.du import DiskUsage
 from pex.cli.commands.cache_aware import CacheAwareMixin
 from pex.commands.command import OutputMixin
-from pex.common import pluralize, safe_rmtree
-from pex.dist_metadata import ProjectNameAndVersion
+from pex.common import pluralize, rmtree, safe_rmtree
+from pex.dist_metadata import ProjectNameAndVersion, UnrecognizedDistributionFormat
 from pex.exceptions import reportable_unexpected_error_msg
-from pex.jobs import SpawnedJob, execute_parallel, iter_map_parallel, map_parallel
+from pex.jobs import (
+    Retain,
+    SpawnedJob,
+    execute_parallel,
+    iter_map_parallel,
+    map_parallel,
+)
 from pex.orderedset import OrderedSet
 from pex.pep_440 import Version
 from pex.pep_503 import ProjectName
+from pex.pip.installation import iter_all as iter_all_pips
 from pex.pip.tool import Pip
 from pex.result import Error, Ok, Result
 from pex.typing import TYPE_CHECKING
@@ -42,7 +49,17 @@ from pex.variables import ENV
 
 if TYPE_CHECKING:
     import typing
-    from typing import DefaultDict, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
+    from typing import (
+        DefaultDict,
+        Iterable,
+        Iterator,
+        List,
+        Mapping,
+        Optional,
+        Set,
+        Tuple,
+        Union,
+    )
 
     import attr  # vendor:skip
 else:
@@ -90,57 +107,176 @@ class Cutoff(object):
     cutoff = attr.ib()  # type: datetime
 
 
-def _prune_cache_dir(
-    dry_run,  # type: bool
-    additional_cache_dirs_by_project_name_and_version,  # type: Mapping[Tuple[ProjectName, Version], Iterable[AtomicCacheDir]]
-    cache_dir,  # type: AtomicCacheDir
-):
-    # type: (...) -> DiskUsage
-    paths_to_prune = []  # type: List[str]
+# Per-entry prune statuses. A dependency whose candidate consumers failed to be deleted is
+# `skipped`; a path whose deletion was attempted but which survives is `failed`; only paths
+# confirmed gone are `succeeded`.
+SUCCEEDED = "succeeded"
+FAILED = "failed"
+SKIPPED = "skipped"
 
-    def prune_if_exists(path):
-        # type: (Optional[str]) -> None
-        if path and os.path.exists(path):
-            paths_to_prune.append(path)
 
-    if isinstance(cache_dir, InstalledWheelDir):
-        paths_to_prune.append(os.path.dirname(cache_dir.path))
-        paths_to_prune.extend(PackedWheelDir.iter(cache_dir.install_hash))
-        for additional_dir in additional_cache_dirs_by_project_name_and_version.get(
-            (cache_dir.project_name, cache_dir.version), ()
-        ):
-            prune_if_exists(additional_dir)
-    elif isinstance(cache_dir, BootstrapDir):
-        paths_to_prune.append(cache_dir.path)
-        paths_to_prune.extend(BootstrapZipDir.iter(cache_dir.bootstrap_hash))
-    else:
-        paths_to_prune.append(cache_dir.path)
+@attr.s(frozen=True)
+class PrunedPath(object):
+    path = attr.ib()  # type: str
+    status = attr.ib()  # type: str
+    disk_usage = attr.ib()  # type: DiskUsage
+    error = attr.ib(default=None)  # type: Optional[str]
 
-    disk_usages = [DiskUsage.collect(path) for path in paths_to_prune]
-    if not dry_run:
-        for path in paths_to_prune:
-            safe_rmtree(path)
-        if isinstance(cache_dir, InstalledWheelDir) and cache_dir.symlink_dir:
-            safe_rmtree(cache_dir.symlink_dir)
-        elif isinstance(cache_dir, VenvDirs):
-            safe_rmtree(cache_dir.short_dir)
 
-    return (
-        disk_usages[0]
-        if len(disk_usages) == 1
-        else DiskUsage.aggregate(cache_dir.path, disk_usages)
+@attr.s(frozen=True)
+class PrunedEntry(object):
+    noun = attr.ib()  # type: str
+    path = attr.ib()  # type: str
+    paths = attr.ib()  # type: Tuple[PrunedPath, ...]
+    status = attr.ib()  # type: str
+    detail = attr.ib(default=None)  # type: Optional[str]
+
+    @staticmethod
+    def skipped(
+        noun,  # type: str
+        path,  # type: str
+        reason,  # type: str
+    ):
+        # type: (...) -> PrunedEntry
+        return PrunedEntry(noun=noun, path=path, paths=(), status=SKIPPED, detail=reason)
+
+    @staticmethod
+    def failed_external(
+        noun,  # type: str
+        path,  # type: str
+        error,  # type: str
+    ):
+        # type: (...) -> PrunedEntry
+        return PrunedEntry(noun=noun, path=path, paths=(), status=FAILED, detail=error)
+
+    @property
+    def disk_usage(self):
+        # type: () -> DiskUsage
+        return DiskUsage.aggregate(
+            self.path,
+            [
+                pruned_path.disk_usage
+                for pruned_path in self.paths
+                if pruned_path.status == SUCCEEDED
+            ],
+        )
+
+
+@attr.s(frozen=True)
+class PrunePaths(object):
+    """A unit of deletion: one logical entry backed by one or more on-disk paths."""
+
+    noun = attr.ib()  # type: str
+    path = attr.ib()  # type: str
+    paths = attr.ib()  # type: Tuple[str, ...]
+
+
+if TYPE_CHECKING:
+    PipActions = Tuple[List[PrunePaths], "OrderedDict[str, Pip]"]
+
+
+def _zero_disk_usage(path=""):
+    # type: (str) -> DiskUsage
+    return DiskUsage(path=path, subdirs=0, files=0, size=0)
+
+
+def _prune_paths(prune_paths):
+    # type: (PrunePaths) -> PrunedEntry
+    """Delete a planned entry, verifying each backing path is actually gone.
+
+    Errors never escape: a path that cannot be removed is reported as `failed` so unrelated
+    entries can still be processed and so dependent entries can be retained.
+    """
+    pruned_paths = []  # type: List[PrunedPath]
+    errors = []  # type: List[str]
+    for path in prune_paths.paths:
+        # A path already removed by a prior run (or by a companion record in this same entry) is
+        # not a failure: re-running with the same cutoff simply re-converges against the disk.
+        if not os.path.lexists(path):
+            pruned_paths.append(
+                PrunedPath(path=path, status=SUCCEEDED, disk_usage=_zero_disk_usage(path))
+            )
+            continue
+        disk_usage = DiskUsage.collect(path)
+        error = None  # type: Optional[str]
+        try:
+            rmtree(path)
+        except OSError as e:
+            error = str(e)
+        if error is None and os.path.lexists(path):
+            error = "The path still exists after deletion was attempted."
+        if error is None:
+            pruned_paths.append(
+                PrunedPath(path=path, status=SUCCEEDED, disk_usage=disk_usage)
+            )
+        else:
+            pruned_paths.append(
+                PrunedPath(
+                    path=path,
+                    status=FAILED,
+                    disk_usage=_zero_disk_usage(path),
+                    error=error,
+                )
+            )
+            errors.append("{path}: {error}".format(path=path, error=error))
+    return PrunedEntry(
+        noun=prune_paths.noun,
+        path=prune_paths.path,
+        paths=tuple(pruned_paths),
+        status=FAILED if errors else SUCCEEDED,
+        detail="; ".join(errors) if errors else None,
     )
 
 
-def _prune_pip(
-    dry_run,  # type: bool
-    pip_path_to_prune,  # type: str
+def _append_unique(
+    paths,  # type: List[str]
+    path,  # type: Optional[str]
 ):
-    # type: (...) -> DiskUsage
-    du = DiskUsage.collect(pip_path_to_prune)
-    if not dry_run:
-        safe_rmtree(pip_path_to_prune)
-    return du
+    # type: (...) -> None
+    if path and path not in paths:
+        paths.append(path)
+
+
+def _dependency_backing_paths(
+    deps,  # type: Iterable[AtomicCacheDir]
+    additional_cache_dirs_by_project_name_and_version,
+    # type: Mapping[Tuple[ProjectName, Version], Iterable[AtomicCacheDir]]
+):
+    # type: (...) -> Tuple[str, ...]
+    paths = []  # type: List[str]
+    for cache_dir in deps:
+        if isinstance(cache_dir, InstalledWheelDir):
+            # The real wheel chroot directory (the install-hash dir for a plain copy or the
+            # wheel-hash chroot directory for symlink-style installs).
+            _append_unique(paths, os.path.dirname(cache_dir.path))
+            for packed_wheel_dir in PackedWheelDir.iter(cache_dir.install_hash):
+                _append_unique(paths, packed_wheel_dir.path)
+            for additional_dir in additional_cache_dirs_by_project_name_and_version.get(
+                (cache_dir.project_name, cache_dir.version), ()
+            ):
+                if os.path.lexists(additional_dir.path):
+                    _append_unique(paths, additional_dir.path)
+            if cache_dir.symlink_dir:
+                _append_unique(paths, cache_dir.symlink_dir)
+        elif isinstance(cache_dir, BootstrapDir):
+            _append_unique(paths, cache_dir.path)
+            for bootstrap_zip_dir in BootstrapZipDir.iter(cache_dir.bootstrap_hash):
+                _append_unique(paths, bootstrap_zip_dir.path)
+        else:
+            _append_unique(paths, cache_dir.path)
+    return tuple(path for path in paths if os.path.lexists(path))
+
+
+def _parent_backing_paths(pex_parent):
+    # type: (PexParent) -> PrunePaths
+    paths = [pex_parent.pex_dir.path]  # type: List[str]
+    if isinstance(pex_parent.pex_dir, VenvDirs):
+        _append_unique(paths, pex_parent.pex_dir.short_dir)
+    return PrunePaths(
+        noun="cached PEX",
+        path=pex_parent.pex_dir.path,
+        paths=tuple(path for path in paths if os.path.lexists(path)),
+    )
 
 
 class Cache(CacheAwareMixin, OutputMixin, BuildTimeCommand):
@@ -421,318 +557,700 @@ class Cache(CacheAwareMixin, OutputMixin, BuildTimeCommand):
 
         return Ok()
 
+    @staticmethod
+    def _cutoff_display(cutoff):
+        # type: (Cutoff) -> str
+        if cutoff.spec.endswith("ago") or cutoff.spec[-1].isdigit():
+            return cutoff.spec
+        return "{cutoff} ago".format(cutoff=cutoff.spec)
+
+    def _print_entry(
+        self,
+        fp,  # type: typing.IO[str]
+        result,  # type: PrunedEntry
+    ):
+        # type: (...) -> None
+        if result.status == SKIPPED:
+            print(
+                "  skipped: {noun} {path} ({detail})".format(
+                    noun=result.noun, path=result.path, detail=result.detail
+                ),
+                file=fp,
+            )
+        elif result.status == FAILED:
+            print(
+                "  failed: {noun} {path}: {detail}".format(
+                    noun=result.noun, path=result.path, detail=result.detail
+                ),
+                file=fp,
+            )
+        else:
+            reclaimed = result.disk_usage.size
+            reclaimed_msg = (
+                " (reclaimed {size})".format(size=self.options.amount_func(reclaimed))
+                if reclaimed
+                else ""
+            )
+            print(
+                "  succeeded: {noun} {path}{reclaimed}".format(
+                    noun=result.noun, path=result.path, reclaimed=reclaimed_msg
+                ),
+                file=fp,
+            )
+
+    def _execute_entries(
+        self,
+        fp,  # type: typing.IO[str]
+        heading,  # type: str
+        entries,  # type: Tuple[PrunePaths, ...]
+        noun,  # type: str
+        extra_results=(),  # type: Iterable[PrunedEntry]
+    ):
+        # type: (...) -> List[PrunedEntry]
+        if not entries and not extra_results:
+            return []
+
+        print(heading, file=fp)
+        results = list(extra_results)  # type: List[PrunedEntry]
+        if entries:
+            # A failure in one entry never blocks the others; each result is reported individually
+            # as succeeded, failed or (by the caller for blocked dependencies) skipped.
+            results.extend(
+                iter_map_parallel(
+                    entries,
+                    _prune_paths,
+                    noun=noun,
+                    verb="prune",
+                    verb_past="pruned",
+                )
+            )
+        results.sort(key=lambda r: (r.status, r.noun, r.path))
+        for result in results:
+            self._print_entry(fp, result)
+        print(file=fp)
+        return results
+
+    @staticmethod
+    def _pip_actions(
+        plan=None,
+        surviving_candidate_parents=None,
+        all_pips=None,
+    ):
+        # type: (...) -> PipActions
+        """Resolves Pip installations to prune and Pip versions retained to run cache ops against.
+
+        When `plan` is passed the resolution reflects scan-time intent (used for the plan /
+        dry-run): a Pip whose owning PEX is a prune candidate is itself a candidate. When
+        `surviving_candidate_parents` is passed the resolution reflects the current disk after
+        parent deletion was attempted: any candidate parent that survived (including via a failed
+        deletion) retains both its Pip PEX and Pip cache.
+
+        `all_pips` is a pre-deletion snapshot: instantiating a `Pip` ensures its venv exists and
+        the Pip PEX `.deps` symlink into the shared installed wheel chroots, so re-scanning after
+        wheel chroots are deleted would chase dangling symlinks. The snapshot is always taken
+        before any deletion and reused.
+        """
+        if all_pips is None:
+            all_pips = list(iter_all_pips(record_access=False))
+        if surviving_candidate_parents is not None:
+            # Start with every PEX dir currently on disk (recent or concurrent) and then account
+            # for candidate parents that survived their deletion attempt directly, closing the
+            # gap where a removed venv short-hash symlink would hide a surviving venv from a glob.
+            surviving_hashes = {
+                pex_dir.pex_hash for pex_dir in Prunable.iter_current_pex_dirs()
+            }
+            for pex_parent in surviving_candidate_parents:
+                if os.path.lexists(pex_parent.pex_dir.path):
+                    surviving_hashes.add(pex_parent.pex_dir.pex_hash)
+        else:
+            candidate_hashes = {
+                pex_parent.pex_dir.pex_hash for pex_parent in (plan.parents if plan else ())
+            }
+            surviving_hashes = {
+                pip.pex_hash for pip in all_pips if pip.pex_hash not in candidate_hashes
+            }
+
+        retained_versions = OrderedSet(
+            pip.version for pip in all_pips if pip.pex_hash in surviving_hashes
+        )
+        retained_pips = OrderedDict()  # type: OrderedDict[str, Pip]
+        for pip in all_pips:
+            if pip.version in retained_versions:
+                retained_pips.setdefault(str(pip.version), pip)
+
+        entries = []  # type: List[PrunePaths]
+        seen_paths = set()  # type: Set[str]
+        for pip in all_pips:
+            if pip.pex_hash in surviving_hashes:
+                continue
+            full_version_prune = pip.version not in retained_versions
+            remove_path = pip.pex_dir.base_dir if full_version_prune else pip.pex_dir.path
+            if remove_path in seen_paths or not os.path.lexists(remove_path):
+                continue
+            seen_paths.add(remove_path)
+            entries.append(
+                PrunePaths(
+                    noun="Pip" if full_version_prune else "Pip PEX",
+                    path=remove_path,
+                    paths=(remove_path,),
+                )
+            )
+        return entries, retained_pips
+
+    def _pip_cache_results(
+        self,
+        fp,  # type: typing.IO[str]
+        retained_pips,  # type: Mapping[str, Pip]
+        removable_wheels,  # type: Set[Tuple[ProjectName, Version]]
+    ):
+        # type: (...) -> List[PrunedEntry]
+        if not removable_wheels or not retained_pips:
+            return []
+
+        pips = list(retained_pips.values())
+        results = []  # type: List[PrunedEntry]
+
+        def spawn_list(pip):
+            # type: (Pip) -> SpawnedJob[Tuple[Pip, bytes]]
+            return SpawnedJob.stdout(
+                job=pip.spawn_cache_list(),
+                result_func=lambda stdout: (pip, stdout),
+            )
+
+        pip_removes = []  # type: List[Tuple[Pip, str, ProjectNameAndVersion]]
+        for list_result in execute_parallel(
+            inputs=pips, spawn_func=spawn_list, error_handler=Retain()
+        ):
+            pip, payload = list_result
+            if isinstance(payload, Exception):
+                # A `pip cache list` failure is independent of every other Pip: record it and skip
+                # removes for this Pip only; completed filesystem operations are not rolled back.
+                results.append(
+                    PrunedEntry.failed_external(
+                        noun="Pip cache list",
+                        path=str(pip.version),
+                        error="`pip cache list` failed: {error}".format(error=payload),
+                    )
+                )
+                continue
+            try:
+                project_name_and_versions = tuple(
+                    ProjectNameAndVersion.from_filename(wheel_file)
+                    for wheel_file in payload.decode("utf-8").splitlines()
+                    if wheel_file
+                )
+            except (UnicodeDecodeError, UnrecognizedDistributionFormat) as e:
+                results.append(
+                    PrunedEntry.failed_external(
+                        noun="Pip cache list",
+                        path=str(pip.version),
+                        error="could not parse `pip cache list` output: {error}".format(error=e),
+                    )
+                )
+                continue
+            for pnav in project_name_and_versions:
+                if (
+                    pnav.canonicalized_project_name,
+                    pnav.canonicalized_version,
+                ) in removable_wheels:
+                    pip_removes.append(
+                        (
+                            pip,
+                            "{project_name}-{version}*".format(
+                                project_name=pnav.project_name, version=pnav.version
+                            ),
+                            pnav,
+                        )
+                    )
+
+        if not pip_removes:
+            return results
+
+        files_removed_pattern = re.compile(rb"Files removed:\s*(\d+)")
+
+        def spawn_remove(args):
+            # type: (Tuple[Pip, str, ProjectNameAndVersion]) -> SpawnedJob
+            pip, wheel_name_glob, _pnav = args
+            return SpawnedJob.stdout(
+                job=pip.spawn_cache_remove(wheel_name_glob),
+                result_func=lambda stdout: (args, stdout),
+            )
+
+        removes_by_pip = Counter()  # type: typing.Counter[str]
+        for remove_result in execute_parallel(
+            inputs=pip_removes, spawn_func=spawn_remove, error_handler=Retain()
+        ):
+            args, payload = remove_result
+            pip, wheel_name_glob, _pnav = args
+            if isinstance(payload, Exception):
+                results.append(
+                    PrunedEntry.failed_external(
+                        noun="Pip cache remove",
+                        path="{pip}: {glob}".format(pip=pip.version, glob=wheel_name_glob),
+                        error="`pip cache remove {glob}` failed: {error}".format(
+                            glob=wheel_name_glob, error=payload
+                        ),
+                    )
+                )
+                continue
+            # Unlike the prior parser, unparseable output (or an empty/zero parse) is not silently
+            # treated as success: only the documented "Files removed: N" line counts.
+            match = files_removed_pattern.search(payload)
+            if not match:
+                results.append(
+                    PrunedEntry.failed_external(
+                        noun="Pip cache remove",
+                        path="{pip}: {glob}".format(pip=pip.version, glob=wheel_name_glob),
+                        error="could not parse `pip cache remove` output: {output!r}".format(
+                            output=payload.decode("utf-8", errors="replace").strip()
+                        ),
+                    )
+                )
+                continue
+            removes_by_pip[pip.version.value] += int(match.group(1))
+
+        if removes_by_pip:
+            total = sum(removes_by_pip.values())
+            print(
+                "Pruned {total} cached {wheels} from {count} Pip {version}:".format(
+                    total=total,
+                    wheels=pluralize(total, "wheel"),
+                    count=len(removes_by_pip),
+                    version=pluralize(len(removes_by_pip), "version"),
+                ),
+                file=fp,
+            )
+            for pip_version, remove_count in sorted(removes_by_pip.items()):
+                print(
+                    "Pip {version}: removed {remove_count} {wheels}".format(
+                        version=pip_version,
+                        remove_count=remove_count,
+                        wheels=pluralize(remove_count, "wheel"),
+                    ),
+                    file=fp,
+                )
+            print(file=fp)
+        return results
+
+    @staticmethod
+    def _interpreter_prune_paths(candidate_venv_paths=None):
+        # type: (Optional[Set[str]]) -> List[PrunePaths]
+
+        def eligible(interpreter_dir):
+            # type: (InterpreterDir) -> bool
+            try:
+                valid = interpreter_dir.valid()
+            except (OSError, ValueError):
+                # An unreadable or corrupt INTERP-INFO file is as invalid as a missing
+                # interpreter binary and should never abort the rest of the prune.
+                valid = False
+            if not valid:
+                return True
+            venv_dir = interpreter_dir.venv_dir()
+            if venv_dir is None:
+                return False
+            if candidate_venv_paths is None:
+                # Execution time: the interpreter cache entry is only pruned once its venv is
+                # confirmed gone; a failed venv deletion retains it.
+                return not os.path.lexists(venv_dir.path)
+            return venv_dir.path in candidate_venv_paths
+
+        return [
+            PrunePaths(
+                noun="cached interpreter",
+                path=interpreter_dir.path,
+                paths=(interpreter_dir.path,),
+            )
+            for interpreter_dir in InterpreterDir.iter_all()
+            if eligible(interpreter_dir)
+        ]
+
     def _prune(self):
         # type: () -> Result
 
+        dry_run = self.options.dry_run
+        cutoff = self.options.cutoff
+
         with self.output(self.options) as fp:
-            if not self.options.dry_run:
+            if not dry_run:
                 locked = self.lock_cache_for_delete(out=fp)
                 print(file=fp)
                 if not locked:
                     return Error("No cache entries pruned.")
 
-        cutoff = self.options.cutoff
-        prunable = Prunable.scan(cutoff.cutoff)
-        unused_deps = tuple(prunable.iter_other_unused_deps())
-        unused_wheels = tuple(dep for dep in unused_deps if isinstance(dep, InstalledWheelDir))
+            plan = Prunable.scan(cutoff.cutoff)
 
-        additional_cache_dirs_by_project_name_and_version = defaultdict(
-            list
-        )  # type: DefaultDict[Tuple[ProjectName, Version], List[AtomicCacheDir]]
-        cached_artifact_dirs = itertools.chain(
-            BuiltWheelDir.iter_all(), DownloadDir.iter_all()
-        )  # type: Iterator[Union[BuiltWheelDir, DownloadDir]]
-        for cache_dir in cached_artifact_dirs:
-            additional_cache_dirs_by_project_name_and_version[
-                (cache_dir.project_name, cache_dir.version)
-            ].append(cache_dir)
+            # Snapshot Pip installations before anything is deleted: instantiating a Pip ensures
+            # its venv and follows the Pip PEX `.deps` symlinks into shared installed wheel
+            # chroots, which phase 2 may remove; a post-deletion re-scan would be invalid.
+            all_pips = list(iter_all_pips(record_access=False))
 
-        prune_cache_dir = functools.partial(
-            _prune_cache_dir,
-            self.options.dry_run,
-            additional_cache_dirs_by_project_name_and_version,
-        )
-        prune_pip = functools.partial(_prune_pip, self.options.dry_run)
+            additional_cache_dirs_by_project_name_and_version = defaultdict(
+                list
+            )  # type: DefaultDict[Tuple[ProjectName, Version], List[AtomicCacheDir]]
+            cached_artifact_dirs = itertools.chain(
+                BuiltWheelDir.iter_all(), DownloadDir.iter_all()
+            )  # type: Iterator[Union[BuiltWheelDir, DownloadDir]]
+            for cache_dir in cached_artifact_dirs:
+                additional_cache_dirs_by_project_name_and_version[
+                    (cache_dir.project_name, cache_dir.version)
+                ].append(cache_dir)
 
-        def prune_unused_deps(additional=False):
-            # type: (bool) -> None
-
-            if not unused_deps:
-                return
-            disk_usages = tuple(
-                iter_map_parallel(
-                    unused_deps,
-                    prune_cache_dir,
-                    noun="cached PEX dependency",
-                    verb="prune",
-                    verb_past="pruned",
+            def dep_prune_paths(
+                noun,  # type: str
+                dep_records,  # type: Iterable[AtomicCacheDir]
+            ):
+                # type: (...) -> PrunePaths
+                records = tuple(dep_records)
+                backing_paths = _dependency_backing_paths(
+                    records, additional_cache_dirs_by_project_name_and_version
                 )
-            )
-            if disk_usages:
-                print(
-                    "Pruned {count} {additional}unused PEX {dependencies}.".format(
-                        count=len(disk_usages),
-                        additional="additional " if additional else "",
-                        dependencies=pluralize(disk_usages, "dependency"),
-                    ),
-                    file=fp,
-                )
-                print(self._render_usage(disk_usages))
-                print(file=fp)
+                return PrunePaths(noun=noun, path=records[0].path, paths=backing_paths)
 
-        def prune_pips():
-            # type: () -> None
-            if not prunable.pips.paths:
-                return
-
-            print(
-                "{pruned} {count} {cached_pex}.".format(
-                    pruned="Would have pruned" if self.options.dry_run else "Pruned",
-                    count=len(prunable.pips.paths),
-                    cached_pex=pluralize(prunable.pips.paths, "Pip PEX"),
-                ),
-                file=fp,
+            parent_entries = tuple(
+                _parent_backing_paths(pex_parent) for pex_parent in plan.parents
             )
+            dependency_entries = tuple(
+                dep_prune_paths("cached PEX dependency", dependency_use.records)
+                for dependency_use in plan.dependency_uses
+            )
+
+            orphan_records_by_path = OrderedDict()  # type: OrderedDict[str, List[AtomicCacheDir]]
+            for dep in plan.orphan_dependencies:
+                orphan_records_by_path.setdefault(dep.path, []).append(dep)
+            orphan_entries = tuple(
+                dep_prune_paths("cached PEX dependency", records)
+                for records in orphan_records_by_path.values()
+            )
+
+            pip_entries, retained_pips = self._pip_actions(plan=plan, all_pips=all_pips)
+            candidate_venv_paths = {
+                pex_parent.pex_dir.path
+                for pex_parent in plan.parents
+                if isinstance(pex_parent.pex_dir, VenvDirs)
+            }
+            interpreter_entries = tuple(
+                self._interpreter_prune_paths(candidate_venv_paths=candidate_venv_paths)
+            )
+
+            # --- Reviewable plan -----------------------------------------------------------
             print(
-                self._render_usage(
-                    tuple(
-                        iter_map_parallel(
-                            prunable.pips.paths,
-                            function=prune_pip,
-                            noun="Pip",
-                            verb="prune",
-                            verb_past="pruned",
-                        )
-                    )
+                "{mode} Pex cache prune plan for {pex_root} (cutoff: {cutoff}):".format(
+                    mode="Dry-run" if dry_run else "Executing",
+                    pex_root=ENV.PEX_ROOT,
+                    cutoff=self._cutoff_display(cutoff),
                 ),
                 file=fp,
             )
             print(file=fp)
 
-        def prune_pip_caches():
-            # type: () -> None
-
-            prunable_wheels = set()
-            for wheel in unused_wheels:
-                prunable_pnav = ProjectNameAndVersion.from_filename(wheel.wheel_name)
-                prunable_wheels.add(
-                    (prunable_pnav.canonicalized_project_name, prunable_pnav.canonicalized_version)
-                )
-            if not prunable_wheels:
-                return
-
-            def spawn_list(pip):
-                # type: (Pip) -> SpawnedJob[Tuple[ProjectNameAndVersion, ...]]
-                return SpawnedJob.stdout(
-                    job=pip.spawn_cache_list(),
-                    result_func=lambda stdout: tuple(
-                        ProjectNameAndVersion.from_filename(wheel_file)
-                        for wheel_file in stdout.decode("utf-8").splitlines()
-                        if wheel_file
-                    ),
-                )
-
-            pip_removes = []  # type: List[Tuple[Pip, str]]
-            for pip, project_name_and_versions in zip(
-                prunable.pips.pips,
-                execute_parallel(inputs=prunable.pips.pips, spawn_func=spawn_list),
-            ):
-                for pnav in project_name_and_versions:
-                    if (
-                        pnav.canonicalized_project_name,
-                        pnav.canonicalized_version,
-                    ) in prunable_wheels:
-                        pip_removes.append(
-                            (
-                                pip,
-                                "{project_name}-{version}*".format(
-                                    project_name=pnav.project_name, version=pnav.version
-                                ),
-                            )
-                        )
-
-            def parse_remove(stdout):
-                # type: (bytes) -> int
-
-                # The output from `pip cache remove` is a line like:
-                # Files removed: 42
-                _, sep, count = stdout.decode("utf-8").partition(":")
-                if sep != ":" or not count:
-                    return 0
-                try:
-                    return int(count)
-                except ValueError:
-                    return 0
-
-            def spawn_remove(args):
-                # type: (Tuple[Pip, str]) -> SpawnedJob[int]
-                pip, wheel_name_glob = args
-                return SpawnedJob.stdout(
-                    job=pip.spawn_cache_remove(wheel_name_glob),
-                    result_func=parse_remove,
-                )
-
-            removes_by_pip = Counter()  # type: typing.Counter[str]
-            for pip, remove_count in zip(
-                [pip for pip, _ in pip_removes],
-                execute_parallel(inputs=pip_removes, spawn_func=spawn_remove),
-            ):
-                removes_by_pip[pip.version.value] += remove_count
-            if removes_by_pip:
-                total = sum(removes_by_pip.values())
+            if not plan.parents:
                 print(
-                    "Pruned {total} cached {wheels} from {count} Pip {version}:".format(
-                        total=total,
-                        wheels=pluralize(total, "wheel"),
-                        count=len(removes_by_pip),
-                        version=pluralize(removes_by_pip, "version"),
+                    "There are no cached PEX zipapps or venvs last accessed prior to "
+                    "{cutoff}.".format(cutoff=self._cutoff_display(cutoff)),
+                    file=fp,
+                )
+                print(file=fp)
+            else:
+                print(
+                    "1. Cached PEX parents to remove first ({count}):".format(
+                        count=len(parent_entries)
                     ),
                     file=fp,
                 )
-                for pip_version, remove_count in sorted(removes_by_pip.items()):
+                for pex_parent in plan.parents:
+                    print("     {path}".format(path=pex_parent.pex_dir.path), file=fp)
+                    print("       reason: {reason}".format(reason=pex_parent.reason), file=fp)
+                print(file=fp)
+
+            print(
+                "2. Shared PEX dependencies removable once their consumers are confirmed gone "
+                "({count}):".format(count=len(dependency_entries)),
+                file=fp,
+            )
+            for dependency_use in plan.dependency_uses:
+                print(
+                    "     {path} (consumers: {consumers})".format(
+                        path=dependency_use.dep.path,
+                        consumers=", ".join(dependency_use.candidate_consumers),
+                    ),
+                    file=fp,
+                )
+            print(file=fp)
+
+            print(
+                "3. Shared PEX dependencies retained by consumers not selected for pruning "
+                "({count}):".format(count=len(plan.blocked_dependencies)),
+                file=fp,
+            )
+            for dependency_use in plan.blocked_dependencies:
+                print(
+                    "     {path} (still used by: {consumers})".format(
+                        path=dependency_use.dep.path,
+                        consumers=", ".join(dependency_use.retained_consumers),
+                    ),
+                    file=fp,
+                )
+            print(file=fp)
+
+            print(
+                "4. Unreferenced dependencies with no remaining consumers ({count}):".format(
+                    count=len(orphan_entries)
+                ),
+                file=fp,
+            )
+            for entry in orphan_entries:
+                print("     {path}".format(path=entry.path), file=fp)
+            print(file=fp)
+
+            print(
+                "5. Pip installations to prune ({count}); {retained} Pip "
+                "{versions} retained:".format(
+                    count=len(pip_entries),
+                    retained=len(retained_pips),
+                    versions=pluralize(len(retained_pips), "version"),
+                ),
+                file=fp,
+            )
+            for entry in pip_entries:
+                print("     {path}".format(path=entry.path), file=fp)
+            orphan_wheel_pnavs = OrderedSet()
+            for records in orphan_records_by_path.values():
+                for dep in records:
+                    if isinstance(dep, InstalledWheelDir):
+                        pnav = ProjectNameAndVersion.from_filename(dep.wheel_name)
+                        orphan_wheel_pnavs.add(
+                            (pnav.canonicalized_project_name, pnav.canonicalized_version)
+                        )
+            if orphan_wheel_pnavs and retained_pips:
+                print(
+                    "     Pip caches would be pruned of {count} cached {wheels}".format(
+                        count=len(orphan_wheel_pnavs),
+                        wheels=pluralize(len(orphan_wheel_pnavs), "wheel"),
+                    ),
+                    file=fp,
+                )
+            print(file=fp)
+
+            print(
+                "6. Cached interpreters to prune ({count}):".format(
+                    count=len(interpreter_entries)
+                ),
+                file=fp,
+            )
+            for entry in interpreter_entries:
+                print("     {path}".format(path=entry.path), file=fp)
+            print(file=fp)
+
+            if dry_run:
+                # A dry run presents the same dependency-safe ordering and blocking reasons but
+                # performs no deletion and changes no state; every amount below is potential.
+                def potential_usage(label, entries):
+                    # type: (str, Tuple[PrunePaths, ...]) -> None
+                    if not entries:
+                        return
+                    disk_usages = map_parallel(
+                        inputs=tuple(
+                            path for entry in entries for path in entry.paths
+                        ),
+                        function=DiskUsage.collect,
+                        noun="path",
+                        verb="measure",
+                        verb_past="measured",
+                    )
                     print(
-                        "Pip {version}: removed {remove_count} {wheels}".format(
-                            version=pip_version,
-                            remove_count=remove_count,
-                            wheels=pluralize(remove_count, "wheel"),
+                        "{label} {count} {entries}: {usage}".format(
+                            label=label,
+                            count=len(entries),
+                            entries=pluralize(entries, "entry"),
+                            usage=self._render_usage(disk_usages),
                         ),
                         file=fp,
                     )
+
+                potential_usage("Would prune cached PEX parents:", parent_entries)
+                potential_usage("Would prune shared PEX dependencies:", dependency_entries)
+                potential_usage("Would prune unreferenced dependencies:", orphan_entries)
+                potential_usage("Would prune Pip installations:", pip_entries)
+                potential_usage("Would prune cached interpreters:", interpreter_entries)
                 print(file=fp)
-
-        def prune_interpreters():
-            # type: () -> None
-
-            interpreters_to_prune = tuple(prunable.iter_interpreters())
-            if not interpreters_to_prune:
-                return
-
-            print(
-                "{pruned} {count} {cached_interpreter}.".format(
-                    pruned="Would have pruned" if self.options.dry_run else "Pruned",
-                    count=len(interpreters_to_prune),
-                    cached_interpreter=pluralize(interpreters_to_prune, "cached interpreter"),
-                ),
-                file=fp,
-            )
-            print(
-                self._render_usage(
-                    tuple(
-                        iter_map_parallel(
-                            interpreters_to_prune,
-                            function=prune_cache_dir,
-                            noun="interpreter",
-                            verb="prune",
-                            verb_past="pruned",
-                        )
-                    )
-                ),
-                file=fp,
-            )
-            print(file=fp)
-
-        if not prunable.pex_dirs:
-            print(
-                "There are no cached PEX zipapps or venvs last accessed prior to {cutoff}.".format(
-                    cutoff=(
-                        cutoff.spec
-                        if cutoff.spec.endswith("ago") or cutoff.spec[-1].isdigit()
-                        else "{cutoff} ago".format(cutoff=cutoff.spec)
-                    ),
-                ),
-                file=fp,
-            )
-            print(file=fp)
-            prune_unused_deps()
-            prune_pip_caches()
-            prune_interpreters()
-            return Ok()
-
-        print(
-            "{pruned} {count} {cached_pex}.".format(
-                pruned="Would have pruned" if self.options.dry_run else "Pruned",
-                count=len(prunable.pex_dirs),
-                cached_pex=pluralize(prunable.pex_dirs, "cached PEX"),
-            ),
-            file=fp,
-        )
-        print(
-            self._render_usage(
-                tuple(
-                    iter_map_parallel(
-                        prunable.pex_dirs,
-                        prune_cache_dir,
-                        noun="cached PEX",
-                        verb="prune",
-                        verb_past="pruned",
-                    )
+                print(
+                    "Dry run: no cache entries were pruned. Shared dependencies marked retained "
+                    "in section 3 will not be removed; dependencies in section 2 are only removed "
+                    "if all of their consumers in section 1 are removed successfully.",
+                    file=fp,
                 )
-            ),
-            file=fp,
-        )
-        print(file=fp)
+                return Ok()
 
-        deps = tuple(prunable.iter_pex_unused_deps())
-        if self.options.dry_run:
-            print(
-                "Might have pruned up to {count} {cached_pex_dependency}.".format(
-                    count=len(deps),
-                    cached_pex_dependency=pluralize(deps, "cached PEX dependency"),
-                ),
-                file=fp,
+            all_results = []  # type: List[PrunedEntry]
+
+            # Phase 1: remove parents first; shared dependencies are decided afterwards based on
+            # what actually survives.
+            all_results.extend(
+                self._execute_entries(
+                    fp,
+                    "Results - cached PEX parents:",
+                    parent_entries,
+                    noun="cached PEX",
+                )
             )
-            print(
-                self._render_usage(
-                    tuple(
-                        iter_map_parallel(
-                            deps,
-                            prune_cache_dir,
+
+            # Re-converge against the current disk rather than trusting the scan-time graph: a
+            # parent that survived a failed deletion keeps every dependency it references.
+            retained_dep_consumers = Prunable.iter_retained_dep_consumers(plan.parents)
+
+            # If a surviving candidate parent can no longer enumerate its dependencies (e.g. a
+            # partially deleted PEX-INFO), fall back to the scan-time graph and conservatively
+            # retain everything it was known to consume.
+            surviving_candidate_paths = {
+                pex_parent.pex_dir.path
+                for pex_parent in plan.parents
+                if os.path.lexists(pex_parent.pex_dir.path)
+            }
+            for dependency_use in plan.dependency_uses:
+                surviving = [
+                    consumer
+                    for consumer in dependency_use.candidate_consumers
+                    if consumer in surviving_candidate_paths
+                    and consumer not in retained_dep_consumers.get(dependency_use.dep.path, ())
+                ]
+                if surviving:
+                    retained_dep_consumers.setdefault(dependency_use.dep.path, []).extend(
+                        surviving
+                    )
+
+            # Phase 2: shared dependencies; skip any with a surviving consumer.
+            shared_results = []  # type: List[PrunedEntry]
+            removable_dependency_entries = []  # type: List[PrunePaths]
+            for dependency_use, entry in zip(plan.dependency_uses, dependency_entries):
+                surviving = retained_dep_consumers.get(dependency_use.dep.path)
+                if surviving:
+                    shared_results.append(
+                        PrunedEntry.skipped(
                             noun="cached PEX dependency",
-                            verb="prune",
-                            verb_past="pruned",
+                            path=dependency_use.dep.path,
+                            reason="retained by surviving consumer(s): {consumers}".format(
+                                consumers=", ".join(surviving)
+                            ),
                         )
                     )
+                else:
+                    removable_dependency_entries.append(entry)
+            all_results.extend(
+                self._execute_entries(
+                    fp,
+                    "Results - shared PEX dependencies:",
+                    tuple(removable_dependency_entries),
+                    noun="cached PEX dependency",
+                    extra_results=shared_results,
                 )
+            )
+
+            # Phase 3: unreferenced (orphan) dependencies.
+            orphan_results = self._execute_entries(
+                fp,
+                "Results - unreferenced PEX dependencies:",
+                orphan_entries,
+                noun="cached PEX dependency",
+            )
+            all_results.extend(orphan_results)
+
+            # Pip-cache wheel files are only removable for orphan wheels whose chroots are
+            # confirmed gone (a failed chroot deletion retains its Pip-cache copies) and which no
+            # surviving PEX references.
+            removable_pip_wheels = set()  # type: Set[Tuple[ProjectName, Version]]
+            retained_pip_wheel_entries = []  # type: List[PrunedEntry]
+            for path, records in orphan_records_by_path.items():
+                wheel_names = [
+                    dep.wheel_name for dep in records if isinstance(dep, InstalledWheelDir)
+                ]
+                if not wheel_names or retained_dep_consumers.get(path):
+                    continue
+                if os.path.lexists(path):
+                    # The wheel chroot survived; its Pip-cache copies must survive too.
+                    retained_pip_wheel_entries.append(
+                        PrunedEntry.skipped(
+                            noun="Pip cached wheel",
+                            path=path,
+                            reason="retained because its installed wheel could not be removed",
+                        )
+                    )
+                    continue
+                for wheel_name in wheel_names:
+                    pnav = ProjectNameAndVersion.from_filename(wheel_name)
+                    removable_pip_wheels.add(
+                        (pnav.canonicalized_project_name, pnav.canonicalized_version)
+                    )
+
+            # Phase 4: prune wheel files from retained Pip caches (independent failures).
+            pip_cache_results = self._pip_cache_results(
+                fp, retained_pips, removable_pip_wheels
+            )
+            pip_cache_entries = retained_pip_wheel_entries + pip_cache_results
+            if pip_cache_entries:
+                print("Results - Pip caches:", file=fp)
+                for result in sorted(
+                    pip_cache_entries, key=lambda r: (r.status, r.noun, r.path)
+                ):
+                    self._print_entry(fp, result)
+                print(file=fp)
+            all_results.extend(pip_cache_entries)
+
+            # Phase 5: prune Pip PEXes / whole Pip versions re-resolved from the current disk.
+            current_pip_entries, _retained_pips = self._pip_actions(
+                surviving_candidate_parents=plan.parents, all_pips=all_pips
+            )
+            all_results.extend(
+                self._execute_entries(
+                    fp,
+                    "Results - Pip installations:",
+                    tuple(current_pip_entries),
+                    noun="Pip",
+                )
+            )
+
+            # Phase 6: interpreters whose binary is invalid or whose venv is confirmed gone.
+            current_interpreter_entries = tuple(self._interpreter_prune_paths())
+            all_results.extend(
+                self._execute_entries(
+                    fp,
+                    "Results - cached interpreters:",
+                    current_interpreter_entries,
+                    noun="cached interpreter",
+                )
+            )
+
+            counts = Counter(result.status for result in all_results)  # type: typing.Counter[str]
+            succeeded = counts.get(SUCCEEDED, 0)
+            failed = counts.get(FAILED, 0)
+            skipped = counts.get(SKIPPED, 0)
+            reclaimed = DiskUsage.aggregate(
+                path=ENV.PEX_ROOT,
+                usages=[result.disk_usage for result in all_results if result.status == SUCCEEDED],
+            )
+            print(
+                "Prune results: {succeeded} succeeded, {failed} failed, {skipped} skipped.".format(
+                    succeeded=succeeded, failed=failed, skipped=skipped
+                ),
+                file=fp,
+            )
+            print(
+                "Disk space reclaimed (succeeded entries only): {usage}".format(
+                    usage=self._render_usage(reclaimed)
+                ),
+                file=fp,
             )
             print(file=fp)
-            prune_pips()
-            prune_interpreters()
-        else:
-            disk_usages = tuple(
-                iter_map_parallel(
-                    deps,
-                    prune_cache_dir,
-                    noun="cached PEX dependency",
-                    verb="prune",
-                    verb_past="pruned",
+
+            if failed:
+                return Error(
+                    "{failed} {entries} failed to prune and {skipped} {dependencies} were skipped "
+                    "because of surviving dependents; re-run after resolving the reported "
+                    "failures.".format(
+                        failed=failed,
+                        entries=pluralize(failed, "entry"),
+                        skipped=skipped,
+                        dependencies=pluralize(skipped, "dependency"),
+                    )
                 )
-            )
-            if deps and not disk_usages:
-                print(
-                    "No cached PEX dependencies were able to be pruned; all have un-pruned "
-                    "cached PEX dependents.",
-                    file=fp,
-                )
-            elif len(deps) == 1:
-                print("Pruned the 1 cached PEX dependency.", file=fp)
-            elif len(deps) > 1 and len(deps) == len(disk_usages):
-                print(
-                    "Pruned all {count} cached PEX dependencies.".format(count=len(deps)),
-                    file=fp,
-                )
-            elif len(deps) > 1:
-                print(
-                    "Pruned {count} of {total} cached PEX dependencies.".format(
-                        count=len(disk_usages), total=len(deps)
-                    ),
-                    file=fp,
-                )
-            if disk_usages:
-                print(self._render_usage(disk_usages))
-            if deps or disk_usages:
-                print(file=fp)
-            prune_unused_deps(additional=len(disk_usages) > 0)
-            prune_pip_caches()
-            prune_pips()
-            prune_interpreters()
-        return Ok()
+            return Ok()

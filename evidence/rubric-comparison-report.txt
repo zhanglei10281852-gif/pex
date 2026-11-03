@@ -1,0 +1,9 @@
+项目：pex-tool-pex-dc6b01f6-fb01-464f-bb25-ab08e6ba35b6｜Session：6ae96652e498b5216ff88e49｜结论：部分完成
+Rubric ID：1｜状态：通过｜期望行为：依赖仅在所有候选使用者实际删除成功后删除。｜实际观察：扫描建立依赖到候选与保留父项的引用图；父项删除后重新扫描当前磁盘，存在任何 surviving consumer 时生成 skipped 而不删除依赖。｜直接证据：pex/cache/prunable.py:117-248；pex/cli/commands/cache/command.py:1096-1155。
+Rubric ID：2｜状态：通过｜期望行为：单个父目录失败不阻断独立项，并保留该父项依赖。｜实际观察：_prune_paths 将每个删除错误转为 failed，iter_map_parallel 继续其他条目；存活父项通过当前磁盘与扫描时回退图保留依赖。｜直接证据：pex/cli/commands/cache/command.py:183-229、601-631、1096-1155。
+Rubric ID：3｜状态：通过｜期望行为：Pip cache list/remove 失败明确记录并影响退出结果，不回滚文件删除且不静默为零。｜实际观察：并行作业异常和不可解析输出均生成 FAILED PrunedEntry，最终 failed 计数返回 Error；独立测试通过。｜直接证据：pex/cli/commands/cache/command.py:700-832、1225-1257；pip_cache_failures 测试 1 passed。
+Rubric ID：4｜状态：未通过｜期望行为：输出与回收量准确汇总 succeeded、failed、skipped，重试按当前状态处理。｜实际观察：一个逻辑条目含 good 与 bad 两个路径时，good 成功删除 100 字节、bad 失败，PrunedEntry 总状态为 failed；最终回收量只聚合总状态为 succeeded 的条目，因此报告 0 字节。｜直接证据：visibility_repro.py 输出 successful_path_bytes=100、final_reclaimed_bytes=0、good_removed=True。｜原因：最终 DiskUsage.aggregate 过滤 result.status == SUCCEEDED，丢弃部分失败条目内部已成功路径的 disk_usage。｜影响：部分成功执行的实际回收空间被少报，输出统计与磁盘变化不一致。｜证据位置：pex/cli/commands/cache/command.py:153-163、183-229、1225-1243；F:/swe/work/visibility_repro.py
+Rubric ID：5｜状态：通过｜期望行为：相同 cutoff 重试删除已解除阻塞的依赖且不误删保留父项内容。｜实际观察：不存在路径按 succeeded 零用量处理；每次运行重新 Prunable.scan 并在父项阶段后重建 retained consumer 映射。｜直接证据：pex/cli/commands/cache/command.py:191-199、868-931、1096-1155。
+Rubric ID：6｜状态：通过｜期望行为：dry-run 同序且不修改状态，成功、无候选、copies/symlinks 和删除锁兼容。｜实际观察：dry-run 使用同一 plan 展示六阶段后直接返回且未调用删除；真实执行仍在扫描前获取既有删除锁，wheel backing paths 同时覆盖 copy、symlink 与附加缓存目录。｜直接证据：pex/cli/commands/cache/command.py:868-885、931-1083；_dependency_backing_paths:240-268。
+
+关键原始证据摘要：Pip 独立失败测试 1 passed；依赖图和重试路径完成代码审计；部分删除复现实际删除 100 字节而最终回收量为 0。

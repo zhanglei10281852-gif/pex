@@ -1,0 +1,19 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "裁剪计划基于 PEX、venv、解释器和共享依赖关系，只有所有候选使用者实际删除成功后才删除对应依赖。"
+  - id: 2
+    type: f2p
+    text: "单个父目录删除失败时，互不依赖项仍可继续处理，而该父项仍需要的 wheel、bootstrap、用户代码和相关缓存被标为 skipped 并保留可用。"
+  - id: 3
+    type: f2p
+    text: "Pip cache list 或 remove 失败被明确记录并影响退出结果，不会回滚已完成的文件删除，也不会被静默当作零删除成功。"
+  - id: 4
+    type: f2p
+    text: "命令输出和回收量分别准确汇总 succeeded、failed 与 skipped 条目；不存在或已由前次删除的路径在重试中按当前状态处理。"
+  - id: 5
+    type: f2p
+    text: "相同 cutoff 的后续重试可删除先前阻塞但现在无引用的依赖，并且不会误删仍被保留父项使用的内容。"
+  - id: 6
+    type: p2p
+    text: "dry-run 与真实执行采用相同选择和依赖顺序但不修改状态；全部成功、无候选、copies 与 symlinks 差异及删除锁等待保持兼容。"

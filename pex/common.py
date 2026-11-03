@@ -371,6 +371,52 @@ def safe_rmtree(directory):
         shutil.rmtree(directory, True)
 
 
+def _make_writable_and_retry(func, path, exc_info):
+    # type: (Any, _Text, Any) -> None
+    # Files marked read-only (common on Windows and for vendored caches) defeat deletion; clear
+    # the read-only bit and retry the failed operation once.
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+    except OSError:
+        pass
+    try:
+        func(path)
+    except Exception:
+        # The final determination of whether deletion succeeded is made by the caller verifying
+        # the path is gone; leave any lingering error in place for it to discover.
+        pass
+
+
+def rmtree(directory):
+    # type: (_Text) -> bool
+    """Delete a directory tree (or a symlink) if present, reporting failures.
+
+    Unlike :func:`safe_rmtree`, this does not silently swallow permission, file-in-use or
+    transient I/O errors: if anything under `directory` survives the removal attempt, an
+    `OSError` is raised so callers know the path is still present and any of its dependents must
+    be retained.
+
+    :return: `True` if `directory` was present and removed; `False` if it was already absent.
+    :raises OSError: if `directory` (or anything under it) could not be fully removed.
+    """
+    if not os.path.lexists(directory):
+        return False
+    if os.path.islink(directory) or not os.path.isdir(directory):
+        # os.unlink raises OSError itself if the entry cannot be removed.
+        os.unlink(directory)
+        return True
+
+    shutil.rmtree(directory, onerror=_make_writable_and_retry)
+
+    if os.path.lexists(directory):
+        raise OSError(
+            "Failed to fully remove {directory}: one or more paths remain.".format(
+                directory=directory
+            )
+        )
+    return True
+
+
 def safe_sleep(seconds):
     # type: (float) -> None
     """Ensure that the thread sleeps at a minimum the requested seconds.
